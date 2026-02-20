@@ -8,7 +8,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Literal, Union, List, Dict, Set, Tuple, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from pydantic import BaseModel, Field
 
@@ -46,7 +46,6 @@ SYSTEM_BOT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 print(">>> MATCHING LOADED FROM:", __file__)
 
-
 # ---------------------------
 # Response schemas
 # ---------------------------
@@ -70,26 +69,6 @@ class MatchResultSuccess(BaseModel):
 
 
 MatchResult = Union[MatchResultIneligible, MatchResultNoMatch, MatchResultSuccess]
-
-
-# ---------------------------
-# DEBUG helpers (NEW)
-# ---------------------------
-async def _db_fingerprint(conn) -> Dict[str, Any]:
-    row = (
-        await conn.execute(
-            text(
-                """
-                select
-                  current_database() as db,
-                  inet_server_addr() as host,
-                  inet_server_port() as port,
-                  now() as now
-                """
-            )
-        )
-    ).mappings().first()
-    return dict(row) if row else {}
 
 
 # ---------------------------
@@ -165,7 +144,6 @@ async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
     interests_count = int(interests_row["n"]) if interests_row else 0
     has_interest = interests_count >= 1
 
-    # Safe even if table is missing: return 0 instead of crashing
     photos_count_row = (
         await conn.execute(
             text(
@@ -246,24 +224,24 @@ async def _fetch_user(conn, user_id: str):
         await conn.execute(
             text(
                 """
-                select
-                    id::text              as id,
-                    full_name,
-                    gender,
-                    gender_pref,
-                    age,
-                    verified,
-                    banned,
-                    active_chats,
-                    personality_weight,
-                    interests_weight,
-                    last_match_date,
-                    last_login_at,
-                    created_at,
-                    updated_at
-                from users
-                where id = :uid
-                """
+        select
+            id::text              as id,
+            full_name,
+            gender,
+            gender_pref,
+            age,
+            verified,
+            banned,
+            active_chats,
+            personality_weight,
+            interests_weight,
+            last_match_date,
+            last_login_at,
+            created_at,
+            updated_at
+        from users
+        where id = :uid
+    """
             ),
             {"uid": user_id},
         )
@@ -290,10 +268,6 @@ async def _fetch_user_bio(conn, user_id: str) -> str:
 
 
 async def _fetch_user_geo(conn, user_id: str) -> Optional[Dict[str, float]]:
-    """
-    Returns {lat, lng, max_km} for user, or None if user has no location_id.
-    preferred_max_distance_km NULL -> DEFAULT_MAX_DISTANCE_KM.
-    """
     row = (
         await conn.execute(
             text(
@@ -327,10 +301,10 @@ async def _personality_map(conn, user_id: str) -> Dict[int, float]:
         await conn.execute(
             text(
                 """
-                select trait_id, score
-                from user_personality
-                where user_id = :uid
-                """
+        select trait_id, score
+        from user_personality
+        where user_id = :uid
+    """
             ),
             {"uid": user_id},
         )
@@ -343,10 +317,10 @@ async def _pref_map(conn, user_id: str) -> Dict[int, float]:
         await conn.execute(
             text(
                 """
-                select trait_id, score
-                from user_personality_pref
-                where user_id = :uid
-                """
+        select trait_id, score
+        from user_personality_pref
+        where user_id = :uid
+    """
             ),
             {"uid": user_id},
         )
@@ -359,11 +333,11 @@ async def _interests_set(conn, user_id: str) -> Set[str]:
         await conn.execute(
             text(
                 """
-                select i.name
-                from user_interests ui
-                join interests i on i.id = ui.interest_id
-                where ui.user_id = :uid
-                """
+        select i.name
+        from user_interests ui
+        join interests i on i.id = ui.interest_id
+        where ui.user_id = :uid
+    """
             ),
             {"uid": user_id},
         )
@@ -376,10 +350,10 @@ async def _count_personality_rows(conn, user_id: str) -> int:
         await conn.execute(
             text(
                 """
-                select count(*) as c
-                from user_personality
-                where user_id = :uid
-                """
+        select count(*) as c
+        from user_personality
+        where user_id = :uid
+    """
             ),
             {"uid": user_id},
         )
@@ -392,10 +366,10 @@ async def _count_pref_rows(conn, user_id: str) -> int:
         await conn.execute(
             text(
                 """
-                select count(*) as c
-                from user_personality_pref
-                where user_id = :uid
-                """
+        select count(*) as c
+        from user_personality_pref
+        where user_id = :uid
+    """
             ),
             {"uid": user_id},
         )
@@ -408,15 +382,15 @@ async def _already_matched(conn, a_id: str, b_id: str) -> bool:
         await conn.execute(
             text(
                 """
-                select id
-                from conversations
-                where type = 'match'
-                  and (
-                        (user_a_id = :a and user_b_id = :b)
-                     or (user_a_id = :b and user_b_id = :a)
-                  )
-                limit 1
-                """
+        select id
+        from conversations
+        where type = 'match'
+          and (
+                (user_a_id = :a and user_b_id = :b)
+             or (user_a_id = :b and user_b_id = :a)
+          )
+        limit 1
+    """
             ),
             {"a": a_id, "b": b_id},
         )
@@ -483,7 +457,10 @@ def _final_score(
     pw_a = float(a_user_row["personality_weight"])
     pw_b = float(b_user_row["personality_weight"])
     pw = (pw_a + pw_b) / 2.0
-    pw = min(max(pw, 0.0), 1.0)
+    if pw < 0:
+        pw = 0.0
+    if pw > 1:
+        pw = 1.0
     iw = 1.0 - pw
 
     p = personality_score if personality_score is not None else 0.0
@@ -719,24 +696,28 @@ async def _create_conversation_and_stamp(
     match_score: float,
     match_distance_km: Optional[float],
 ) -> str:
+    """
+    Creates the conversation + stamps users.
+    IMPORTANT: this must actually persist, otherwise we must not return "matched".
+    """
     new_cid = str(uuid.uuid4())
 
     await conn.execute(
         text(
             """
-            insert into conversations(
-                id,
-                type,
-                user_a_id,
-                user_b_id,
-                active,
-                match_score,
-                match_distance_km,
-                created_at,
-                updated_at
-            )
-            values (:cid, 'match', :a, :b, true, :ms, :md, now(), now())
-            """
+        insert into conversations(
+            id,
+            type,
+            user_a_id,
+            user_b_id,
+            active,
+            match_score,
+            match_distance_km,
+            created_at,
+            updated_at
+        )
+        values (:cid, 'match', :a, :b, true, :ms, :md, now(), now())
+        """
         ),
         {
             "cid": new_cid,
@@ -750,11 +731,11 @@ async def _create_conversation_and_stamp(
     await conn.execute(
         text(
             """
-            update users
-            set last_match_date = now(),
-                updated_at = now()
-            where id in (:a, :b)
-            """
+        update users
+        set last_match_date = now(),
+            updated_at = now()
+        where id in (:a, :b)
+        """
         ),
         {"a": a_id, "b": b_id},
     )
@@ -762,14 +743,31 @@ async def _create_conversation_and_stamp(
     await conn.execute(
         text(
             """
-            update users
-            set active_chats = active_chats + 1,
-                updated_at = now()
-            where id in (:a, :b)
-            """
+        update users
+        set active_chats = active_chats + 1,
+            updated_at = now()
+        where id in (:a, :b)
+        """
         ),
         {"a": a_id, "b": b_id},
     )
+
+    # sanity check inside the same tx
+    chk = (
+        await conn.execute(
+            text(
+                """
+                select id
+                from conversations
+                where id = :cid and type='match' and active = true
+                """
+            ),
+            {"cid": new_cid},
+        )
+    ).first()
+
+    if not chk:
+        raise RuntimeError("Conversation insert sanity check failed (not visible after insert).")
 
     return new_cid
 
@@ -927,7 +925,11 @@ async def _insert_match_intro_messages(
               (gen_random_uuid(), :cid, :bot, null, 'match_intro', :txt, now(), now(), now())
             """
         ),
-        {"cid": conversation_id, "bot": str(SYSTEM_BOT_ID), "txt": intro_text},
+        {
+            "cid": conversation_id,
+            "bot": str(SYSTEM_BOT_ID),
+            "txt": intro_text,
+        },
     )
 
 
@@ -935,7 +937,9 @@ async def _insert_match_intro_messages(
 # ROUTES
 # ---------------------------
 @router.get("/status")
-async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id)):
+async def get_matching_status(
+    user_id: uuid.UUID = Depends(get_current_user_id),
+):
     async with engine.begin() as conn:
         checks = await _get_checks(conn, user_id)
 
@@ -957,6 +961,7 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
             }
 
         next_iso = _cooldown_next_eligible_iso(checks.get("last_match_date"))
+
         req_ok = (
             checks["verified"]
             and checks["assessment_completed"]
@@ -1009,25 +1014,26 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
 
 
 @router.post("/generate", response_model=MatchResult)
-async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
+async def generate_match(
+    user_id: uuid.UUID = Depends(get_current_user_id),
+):
     """
-    Generate (or attempt to generate) a match for the calling user.
-    Gates old algo with new checks.
-    Also creates an auto "match_intro" message in the conversation for both users.
+    FIX: Commit conversation first (TX#1), then insert intro message (TX#2).
+    This prevents losing the conversation if the server restarts mid-request.
+    """
+    convo_id: Optional[str] = None
+    a_id: Optional[str] = None
+    b_id: Optional[str] = None
+    final_score_for_db: float = 0.0
+    a_interests: Set[str] = set()
+    b_interests_for_intro: Set[str] = set()
+    a_name: str = "You"
+    b_name: str = "They"
 
-    IMPORTANT (NEW):
-    - After creating the conversation, we SELECT it back inside the same transaction.
-      If it isn't there, we throw 500 (so you won't get a fake "matched" response).
-    - We log DB fingerprint so you can verify which DB Render is using.
-    """
+    # -----------------------
+    # TX #1: compute + create conversation (MUST persist)
+    # -----------------------
     async with engine.begin() as conn:
-        # DB fingerprint log (NEW)
-        try:
-            fp = await _db_fingerprint(conn)
-            logger.warning("MATCHING_DB_FINGERPRINT %s", fp)
-        except Exception:
-            logger.exception("Could not read DB fingerprint")
-
         ok_new, reason_new, _checks = await _is_user_eligible_new_checks(conn, user_id)
         if not ok_new:
             return MatchResultIneligible(
@@ -1057,6 +1063,7 @@ async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
         a_traits = await _personality_map(conn, a_row["id"])
         a_prefs = await _pref_map(conn, a_row["id"])
         a_interests = await _interests_set(conn, a_row["id"])
+        a_name = a_row.get("full_name") or "You"
 
         candidates = await _fetch_candidate_pool(
             conn=conn,
@@ -1095,6 +1102,7 @@ async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
                 a_prefs=a_prefs,
                 b_prefs=b_prefs,
             )
+
             i_score = _interest_score(a_interests, b_interests)
 
             if p_score is None and i_score is None:
@@ -1111,6 +1119,7 @@ async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
                 best_score_val = fs
                 best_candidate = b_row
                 best_distance_km = float(b_row.get("distance_km")) if b_row.get("distance_km") is not None else None
+                b_interests_for_intro = b_interests
 
         if best_candidate is None:
             return MatchResultNoMatch(status="no_match", user_id=str(user_id))
@@ -1125,49 +1134,33 @@ async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
             best_distance_km,
         )
 
-        # ✅ VERIFY the conversation exists (NEW, hard proof)
-        check = (
-            await conn.execute(
-                text(
-                    """
-                    select id::text, type, active, user_a_id::text as a, user_b_id::text as b, created_at
-                    from conversations
-                    where id = :cid
-                    """
-                ),
-                {"cid": convo_id},
-            )
-        ).mappings().first()
+        a_id = a_row["id"]
+        b_id = best_candidate["id"]
+        b_name = best_candidate.get("full_name") or "They"
 
-        logger.warning("AFTER_INSERT_CONVERSATION_CHECK %s", dict(check) if check else None)
-
-        if not check:
-            # If this happens, you are not writing to where you think you are.
-            raise HTTPException(
-                status_code=500,
-                detail="Match insert verification failed: conversation not found immediately after insert.",
-            )
-
-        # Insert intro message (still non-fatal)
+    # -----------------------
+    # TX #2: insert intro message (nice-to-have)
+    # -----------------------
+    if convo_id and a_id and b_id:
         try:
-            b_interests_for_intro = await _interests_set(conn, best_candidate["id"])
-            await _insert_match_intro_messages(
-                conn=conn,
-                conversation_id=convo_id,
-                user_a_id=a_row["id"],
-                user_b_id=best_candidate["id"],
-                a_name=a_row.get("full_name") or "You",
-                b_name=best_candidate.get("full_name") or "They",
-                a_interests=a_interests,
-                b_interests=b_interests_for_intro,
-            )
+            async with engine.begin() as conn2:
+                await _insert_match_intro_messages(
+                    conn=conn2,
+                    conversation_id=convo_id,
+                    user_a_id=a_id,
+                    user_b_id=b_id,
+                    a_name=a_name,
+                    b_name=b_name,
+                    a_interests=a_interests,
+                    b_interests=b_interests_for_intro,
+                )
         except Exception as e:
-            logger.exception("Failed to insert match intro: %s", e)
+            logger.exception("Failed to insert match intro (non-fatal): %s", e)
 
-        return MatchResultSuccess(
-            status="matched",
-            user_a_id=a_row["id"],
-            user_b_id=best_candidate["id"],
-            score=round(final_score_for_db, 4),
-            conversation_id=convo_id,
-        )
+    return MatchResultSuccess(
+        status="matched",
+        user_a_id=a_id or str(user_id),
+        user_b_id=b_id or "",
+        score=round(final_score_for_db, 4),
+        conversation_id=convo_id or "",
+    )
