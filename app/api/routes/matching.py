@@ -60,6 +60,27 @@ class MatchResultSuccess(BaseModel):
 MatchResult = Union[MatchResultIneligible, MatchResultNoMatch, MatchResultSuccess]
 
 
+def _parse_iso_utc(ts: str) -> Optional[datetime]:
+    """
+    Accepts:
+      - '2026-02-20T12:34:56Z'
+      - '2026-02-20T12:34:56+00:00'
+    Returns an aware datetime in UTC.
+    """
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        s = ts.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
 async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
     u = (
         await conn.execute(
@@ -465,18 +486,13 @@ async def _is_user_eligible_new_checks(conn, user_id: uuid.UUID) -> Tuple[bool, 
 
     next_iso = _cooldown_next_eligible_iso(checks.get("last_match_date"))
     if next_iso:
-        cooldown_row = (
-            await conn.execute(
-                text(
-                    """
-                    select case when :nxt::timestamptz <= now() then true else false end as ok
-                    """
-                ),
-                {"nxt": next_iso},
-            )
-        ).mappings().first()
-        eligible_now = bool(cooldown_row["ok"]) if cooldown_row else False
-        if not eligible_now:
+        nxt_dt = _parse_iso_utc(next_iso)
+        if nxt_dt is not None:
+            now_utc = datetime.now(timezone.utc)
+            if nxt_dt > now_utc:
+                return False, "Please wait before requesting another match.", checks
+        else:
+            # If parsing fails, be conservative (avoid letting people bypass cooldown)
             return False, "Please wait before requesting another match.", checks
 
     return True, None, checks
@@ -841,13 +857,11 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
 
         eligible_now = req_ok
         if req_ok and next_iso:
-            cooldown_row = (
-                await conn.execute(
-                    text("select case when :nxt::timestamptz <= now() then true else false end as ok"),
-                    {"nxt": next_iso},
-                )
-            ).mappings().first()
-            eligible_now = bool(cooldown_row["ok"]) if cooldown_row else False
+            nxt_dt = _parse_iso_utc(next_iso)
+            if nxt_dt is not None:
+                eligible_now = nxt_dt <= datetime.now(timezone.utc)
+            else:
+                eligible_now = False
 
         built = _build_missing_reasons(checks)
         reason = built["reason"]
