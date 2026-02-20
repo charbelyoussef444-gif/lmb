@@ -334,7 +334,6 @@ async def _count_pref_rows(conn, user_id: str) -> int:
 
 
 async def _already_matched(conn, a_id: str, b_id: str) -> bool:
-    # IMPORTANT: bind UUID as uuid.UUID and do NOT use :a::uuid casts inside text()
     a_uuid = uuid.UUID(a_id)
     b_uuid = uuid.UUID(b_id)
 
@@ -496,7 +495,6 @@ async def _is_user_eligible_new_checks(conn, user_id: uuid.UUID) -> Tuple[bool, 
             if nxt_dt > now_utc:
                 return False, "Please wait before requesting another match.", checks
         else:
-            # If parsing fails, be conservative (avoid letting people bypass cooldown)
             return False, "Please wait before requesting another match.", checks
 
     return True, None, checks
@@ -504,8 +502,6 @@ async def _is_user_eligible_new_checks(conn, user_id: uuid.UUID) -> Tuple[bool, 
 
 async def _fetch_candidate_pool(conn, a_user_id: str, a_lat: float, a_lng: float, a_max_km: float):
     min_required_prefs = int(TRAIT_COUNT_EXPECTED * MIN_PREF_COVERAGE)
-
-    # IMPORTANT: bind UUID as uuid.UUID and do NOT use :me::uuid
     me_uuid = uuid.UUID(a_user_id)
 
     rows = (
@@ -607,7 +603,6 @@ async def _fetch_candidate_pool(conn, a_user_id: str, a_lat: float, a_lng: float
 
 
 async def _create_conversation_and_stamp(conn, a_id: str, b_id: str, match_score: float, match_distance_km: Optional[float]) -> str:
-    # IMPORTANT: bind UUID as uuid.UUID and do NOT use :x::uuid in text()
     new_cid_uuid = uuid.uuid4()
     a_uuid = uuid.UUID(a_id)
     b_uuid = uuid.UUID(b_id)
@@ -804,17 +799,18 @@ async def _insert_match_intro_messages(
         intro_text = "You two might actually have a conversation that isn’t small talk. What’s something you’ve been genuinely excited about lately?"
 
     cid_uuid = uuid.UUID(conversation_id)
-    ra_uuid = uuid.UUID(user_a_id)
-    rb_uuid = uuid.UUID(user_b_id)
+    a_uuid = uuid.UUID(user_a_id)
+    b_uuid = uuid.UUID(user_b_id)
 
-    # IMPORTANT: bind UUIDs as uuid.UUID and do NOT use :x::uuid casts
+    # ✅ FIX: your DB trigger requires match messages to have BOTH participants
+    # So we insert match_intro as user->user messages (two rows, one per direction).
     await conn.execute(
         text(
             """
             insert into messages(
               id,
               conversation_id,
-              sender_bot_id,
+              sender_user_id,
               receiver_user_id,
               message_type,
               content_text,
@@ -823,15 +819,14 @@ async def _insert_match_intro_messages(
               read_at
             )
             values
-              (gen_random_uuid(), :cid, :bot, :ra, 'match_intro', :txt, now(), now(), now()),
-              (gen_random_uuid(), :cid, :bot, :rb, 'match_intro', :txt, now(), now(), now())
+              (gen_random_uuid(), :cid, :a, :b, 'match_intro', :txt, now(), now(), null),
+              (gen_random_uuid(), :cid, :b, :a, 'match_intro', :txt, now(), now(), null)
             """
         ),
         {
             "cid": cid_uuid,
-            "bot": SYSTEM_BOT_ID,
-            "ra": ra_uuid,
-            "rb": rb_uuid,
+            "a": a_uuid,
+            "b": b_uuid,
             "txt": intro_text,
         },
     )
@@ -911,7 +906,6 @@ async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
     a_name: str = "You"
     b_name: str = "They"
 
-    # TX #1: compute + create conversation
     async with engine.begin() as conn:
         ok_new, reason_new, _checks = await _is_user_eligible_new_checks(conn, user_id)
         if not ok_new:
@@ -994,7 +988,6 @@ async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
         b_id = best_candidate["id"]
         b_name = best_candidate.get("full_name") or "They"
 
-    # TX #2: insert intro message (non-fatal)
     if convo_id and a_id and b_id:
         try:
             async with engine.begin() as conn2:
