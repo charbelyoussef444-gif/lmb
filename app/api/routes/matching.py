@@ -20,35 +20,24 @@ from app.deps.auth import get_current_user_id
 router = APIRouter(prefix="/matching", tags=["matching"])
 logger = logging.getLogger(__name__)
 
-# ---------------------------
-# OpenAI client (optional)
-# ---------------------------
 _OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 openai_client: Optional[AsyncOpenAI] = AsyncOpenAI(api_key=_OPENAI_API_KEY) if _OPENAI_API_KEY else None
 
-# ---------------------------
-# constants / tuning
-# ---------------------------
 TRAIT_COUNT_EXPECTED = 10
-MIN_PREF_COVERAGE = 0.7  # 70% of prefs must be filled
+MIN_PREF_COVERAGE = 0.7
 COOLDOWN_HOURS = 24
 MAX_ACTIVE_CHATS = 3
 MIN_AGE = 18
 
-MATCH_COOLDOWN_HOURS = 24  # keep consistent with COOLDOWN_HOURS
-PHOTO_TABLE = "user_photos"  # confirmed by you
+MATCH_COOLDOWN_HOURS = 24
+PHOTO_TABLE = "user_photos"
 
-# Distance filtering (no PostGIS)
 DEFAULT_MAX_DISTANCE_KM = 25
 EARTH_RADIUS_KM = 6371.0
 
 SYSTEM_BOT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
-print(">>> MATCHING LOADED FROM:", __file__)
 
-# ---------------------------
-# Response schemas
-# ---------------------------
 class MatchResultIneligible(BaseModel):
     status: Literal["ineligible"]
     user_id: str
@@ -71,27 +60,12 @@ class MatchResultSuccess(BaseModel):
 MatchResult = Union[MatchResultIneligible, MatchResultNoMatch, MatchResultSuccess]
 
 
-# ---------------------------
-# NEW CHECKS
-# ---------------------------
 async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
-    """
-    Required BEFORE matching:
-      - users.verified = true
-      - assessment completed (events has event_name='assessment_completed')
-      - users.banned = false
-      - at least 1 interest in user_interests
-      - at least 3 photos in user_photos where kind='gallery' and photo_url not empty
-    """
     u = (
         await conn.execute(
             text(
                 """
-                select
-                  id,
-                  verified,
-                  banned,
-                  last_match_date
+                select id, verified, banned, last_match_date
                 from users
                 where id = :uid
                 """
@@ -216,32 +190,29 @@ def _build_missing_reasons(checks: Dict[str, Any]) -> Dict[str, Any]:
     return {"missing": missing, "reason": reason}
 
 
-# ---------------------------
-# helpers to talk to DB
-# ---------------------------
 async def _fetch_user(conn, user_id: str):
     row = (
         await conn.execute(
             text(
                 """
-        select
-            id::text              as id,
-            full_name,
-            gender,
-            gender_pref,
-            age,
-            verified,
-            banned,
-            active_chats,
-            personality_weight,
-            interests_weight,
-            last_match_date,
-            last_login_at,
-            created_at,
-            updated_at
-        from users
-        where id = :uid
-    """
+                select
+                  id::text as id,
+                  full_name,
+                  gender,
+                  gender_pref,
+                  age,
+                  verified,
+                  banned,
+                  active_chats,
+                  personality_weight,
+                  interests_weight,
+                  last_match_date,
+                  last_login_at,
+                  created_at,
+                  updated_at
+                from users
+                where id = :uid
+                """
             ),
             {"uid": user_id},
         )
@@ -252,19 +223,11 @@ async def _fetch_user(conn, user_id: str):
 async def _fetch_user_bio(conn, user_id: str) -> str:
     row = (
         await conn.execute(
-            text(
-                """
-                select personal_bio
-                from users
-                where id = :uid
-                """
-            ),
+            text("select personal_bio from users where id = :uid"),
             {"uid": user_id},
         )
     ).mappings().first()
-    if not row:
-        return ""
-    return (row.get("personal_bio") or "").strip()
+    return (row.get("personal_bio") or "").strip() if row else ""
 
 
 async def _fetch_user_geo(conn, user_id: str) -> Optional[Dict[str, float]]:
@@ -289,23 +252,13 @@ async def _fetch_user_geo(conn, user_id: str) -> Optional[Dict[str, float]]:
     if not row:
         return None
 
-    return {
-        "lat": float(row["lat"]),
-        "lng": float(row["lng"]),
-        "max_km": float(row["max_km"]),
-    }
+    return {"lat": float(row["lat"]), "lng": float(row["lng"]), "max_km": float(row["max_km"])}
 
 
 async def _personality_map(conn, user_id: str) -> Dict[int, float]:
     rows = (
         await conn.execute(
-            text(
-                """
-        select trait_id, score
-        from user_personality
-        where user_id = :uid
-    """
-            ),
+            text("select trait_id, score from user_personality where user_id = :uid"),
             {"uid": user_id},
         )
     ).mappings().all()
@@ -315,13 +268,7 @@ async def _personality_map(conn, user_id: str) -> Dict[int, float]:
 async def _pref_map(conn, user_id: str) -> Dict[int, float]:
     rows = (
         await conn.execute(
-            text(
-                """
-        select trait_id, score
-        from user_personality_pref
-        where user_id = :uid
-    """
-            ),
+            text("select trait_id, score from user_personality_pref where user_id = :uid"),
             {"uid": user_id},
         )
     ).mappings().all()
@@ -333,11 +280,11 @@ async def _interests_set(conn, user_id: str) -> Set[str]:
         await conn.execute(
             text(
                 """
-        select i.name
-        from user_interests ui
-        join interests i on i.id = ui.interest_id
-        where ui.user_id = :uid
-    """
+                select i.name
+                from user_interests ui
+                join interests i on i.id = ui.interest_id
+                where ui.user_id = :uid
+                """
             ),
             {"uid": user_id},
         )
@@ -348,33 +295,21 @@ async def _interests_set(conn, user_id: str) -> Set[str]:
 async def _count_personality_rows(conn, user_id: str) -> int:
     r = (
         await conn.execute(
-            text(
-                """
-        select count(*) as c
-        from user_personality
-        where user_id = :uid
-    """
-            ),
+            text("select count(*) as c from user_personality where user_id = :uid"),
             {"uid": user_id},
         )
     ).first()
-    return int(r[0])
+    return int(r[0]) if r else 0
 
 
 async def _count_pref_rows(conn, user_id: str) -> int:
     r = (
         await conn.execute(
-            text(
-                """
-        select count(*) as c
-        from user_personality_pref
-        where user_id = :uid
-    """
-            ),
+            text("select count(*) as c from user_personality_pref where user_id = :uid"),
             {"uid": user_id},
         )
     ).first()
-    return int(r[0])
+    return int(r[0]) if r else 0
 
 
 async def _already_matched(conn, a_id: str, b_id: str) -> bool:
@@ -382,15 +317,15 @@ async def _already_matched(conn, a_id: str, b_id: str) -> bool:
         await conn.execute(
             text(
                 """
-        select id
-        from conversations
-        where type = 'match'
-          and (
-                (user_a_id = :a and user_b_id = :b)
-             or (user_a_id = :b and user_b_id = :a)
-          )
-        limit 1
-    """
+                select id
+                from conversations
+                where type = 'match'
+                  and (
+                        (user_a_id = :a::uuid and user_b_id = :b::uuid)
+                     or (user_a_id = :b::uuid and user_b_id = :a::uuid)
+                  )
+                limit 1
+                """
             ),
             {"a": a_id, "b": b_id},
         )
@@ -398,13 +333,7 @@ async def _already_matched(conn, a_id: str, b_id: str) -> bool:
     return row is not None
 
 
-# ---------------------------
-# scoring helpers (pure python)
-# ---------------------------
-def _directional_personality_score(
-    prefs_from_A: Dict[int, float],
-    traits_of_B: Dict[int, float],
-) -> Optional[float]:
+def _directional_personality_score(prefs_from_A: Dict[int, float], traits_of_B: Dict[int, float]) -> Optional[float]:
     sims: List[float] = []
     for tid, score_val in prefs_from_A.items():
         if tid not in traits_of_B:
@@ -415,9 +344,7 @@ def _directional_personality_score(
         if sim < 0:
             sim = 0.0
         sims.append(sim)
-    if not sims:
-        return None
-    return sum(sims) / len(sims)
+    return (sum(sims) / len(sims)) if sims else None
 
 
 def _personality_match_score(
@@ -448,19 +375,11 @@ def _interest_score(a_set: Set[str], b_set: Set[str]) -> Optional[float]:
     return (a_ratio + b_ratio) / 2.0
 
 
-def _final_score(
-    a_user_row,
-    b_user_row,
-    personality_score: Optional[float],
-    interest_score: Optional[float],
-) -> float:
+def _final_score(a_user_row, b_user_row, personality_score: Optional[float], interest_score: Optional[float]) -> float:
     pw_a = float(a_user_row["personality_weight"])
     pw_b = float(b_user_row["personality_weight"])
     pw = (pw_a + pw_b) / 2.0
-    if pw < 0:
-        pw = 0.0
-    if pw > 1:
-        pw = 1.0
+    pw = max(0.0, min(1.0, pw))
     iw = 1.0 - pw
 
     p = personality_score if personality_score is not None else 0.0
@@ -468,9 +387,6 @@ def _final_score(
     return pw * p + iw * i
 
 
-# ---------------------------
-# gender / gender_pref logic
-# ---------------------------
 def _pref_allows_gender(pref: str, other_gender: str) -> bool:
     pref = (pref or "").strip().lower()
     other_gender = (other_gender or "").strip().lower()
@@ -490,16 +406,9 @@ def _gender_match_ok(a_row, b_row) -> bool:
     a_gender = (a_row.get("gender") or "").strip().lower()
     b_gender = (b_row.get("gender") or "").strip().lower()
 
-    if not _pref_allows_gender(a_pref, b_gender):
-        return False
-    if not _pref_allows_gender(b_pref, a_gender):
-        return False
-    return True
+    return _pref_allows_gender(a_pref, b_gender) and _pref_allows_gender(b_pref, a_gender)
 
 
-# ---------------------------
-# eligibility checks (old + new)
-# ---------------------------
 async def _is_user_eligible_old_rules(conn, user_row) -> Tuple[bool, Optional[str]]:
     if not user_row:
         return False, "User not found"
@@ -536,9 +445,7 @@ async def _is_user_eligible_old_rules(conn, user_row) -> Tuple[bool, Optional[st
     return True, None
 
 
-async def _is_user_eligible_new_checks(
-    conn, user_id: uuid.UUID
-) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+async def _is_user_eligible_new_checks(conn, user_id: uuid.UUID) -> Tuple[bool, Optional[str], Dict[str, Any]]:
     checks = await _get_checks(conn, user_id)
 
     if not checks.get("exists"):
@@ -562,11 +469,7 @@ async def _is_user_eligible_new_checks(
             await conn.execute(
                 text(
                     """
-                    select
-                      case
-                        when :nxt::timestamptz <= now() then true
-                        else false
-                      end as ok
+                    select case when :nxt::timestamptz <= now() then true else false end as ok
                     """
                 ),
                 {"nxt": next_iso},
@@ -579,16 +482,7 @@ async def _is_user_eligible_new_checks(
     return True, None, checks
 
 
-# ---------------------------
-# candidate pool + conversation creation
-# ---------------------------
-async def _fetch_candidate_pool(
-    conn,
-    a_user_id: str,
-    a_lat: float,
-    a_lng: float,
-    a_max_km: float,
-):
+async def _fetch_candidate_pool(conn, a_user_id: str, a_lat: float, a_lng: float, a_max_km: float):
     min_required_prefs = int(TRAIT_COUNT_EXPECTED * MIN_PREF_COVERAGE)
 
     rows = (
@@ -607,7 +501,7 @@ async def _fetch_candidate_pool(
                 ),
                 c as (
                     select
-                      u.id::text              as id,
+                      u.id::text as id,
                       u.full_name,
                       u.gender,
                       u.gender_pref,
@@ -641,7 +535,7 @@ async def _fetch_candidate_pool(
                     join trait_counts tc on tc.user_id = u.id
                     join pref_counts  pc on pc.user_id = u.id
                     join locations lb on lb.id = u.location_id
-                    where u.id <> :me
+                    where u.id <> :me::uuid
                       and u.location_id is not null
                       and u.verified = true
                       and (u.active_chats < :max_chats)
@@ -689,35 +583,23 @@ async def _fetch_candidate_pool(
     return rows
 
 
-async def _create_conversation_and_stamp(
-    conn,
-    a_id: str,
-    b_id: str,
-    match_score: float,
-    match_distance_km: Optional[float],
-) -> str:
-    """
-    Creates the conversation + stamps users.
-    IMPORTANT: this must actually persist, otherwise we must not return "matched".
-    """
+async def _create_conversation_and_stamp(conn, a_id: str, b_id: str, match_score: float, match_distance_km: Optional[float]) -> str:
     new_cid = str(uuid.uuid4())
 
     await conn.execute(
         text(
             """
-        insert into conversations(
-            id,
-            type,
-            user_a_id,
-            user_b_id,
-            active,
-            match_score,
-            match_distance_km,
-            created_at,
-            updated_at
-        )
-        values (:cid, 'match', :a, :b, true, :ms, :md, now(), now())
-        """
+            insert into conversations(
+                id, type, user_a_id, user_b_id, active,
+                match_score, match_distance_km,
+                created_at, updated_at
+            )
+            values (
+                :cid::uuid, 'match', :a::uuid, :b::uuid, true,
+                :ms, :md,
+                now(), now()
+            )
+            """
         ),
         {
             "cid": new_cid,
@@ -731,11 +613,11 @@ async def _create_conversation_and_stamp(
     await conn.execute(
         text(
             """
-        update users
-        set last_match_date = now(),
-            updated_at = now()
-        where id in (:a, :b)
-        """
+            update users
+            set last_match_date = now(),
+                updated_at = now()
+            where id in (:a::uuid, :b::uuid)
+            """
         ),
         {"a": a_id, "b": b_id},
     )
@@ -743,23 +625,24 @@ async def _create_conversation_and_stamp(
     await conn.execute(
         text(
             """
-        update users
-        set active_chats = active_chats + 1,
-            updated_at = now()
-        where id in (:a, :b)
-        """
+            update users
+            set active_chats = active_chats + 1,
+                updated_at = now()
+            where id in (:a::uuid, :b::uuid)
+            """
         ),
         {"a": a_id, "b": b_id},
     )
 
-    # sanity check inside the same tx
     chk = (
         await conn.execute(
             text(
                 """
                 select id
                 from conversations
-                where id = :cid and type='match' and active = true
+                where id::text = :cid
+                  and type='match'
+                  and active = true
                 """
             ),
             {"cid": new_cid},
@@ -767,31 +650,21 @@ async def _create_conversation_and_stamp(
     ).first()
 
     if not chk:
-        raise RuntimeError("Conversation insert sanity check failed (not visible after insert).")
+        raise RuntimeError("Conversation insert sanity check failed.")
 
     return new_cid
 
 
-# ---------------------------
-# MATCH INTRO (GPT, broadcast one message)
-# ---------------------------
 GPT_MATCH_INTRO_SYSTEM_PROMPT = """
 You write ONE shared conversation-starter message for a dating app.
-
-Goal:
-Create immediate curiosity and momentum so BOTH people want to reply quickly.
 
 Rules:
 - Output MUST be valid JSON only. No markdown. No extra keys.
 - Max 90 words.
 - Tone: friendly, confident, playful-with-edge, never cringe.
-- The message should spark light excitement, curiosity, or anticipation (dopamine-forward, not deep or heavy).
 - Use only what appears in the bios + interests. Do NOT invent facts.
-- Avoid politics, religion, trauma, or mental health unless explicitly in the bio (and still keep it light).
-- No lectures, summaries of values, or abstract analysis.
-- The final line MUST be ONE clear, fun, inviting question designed to be easy and enjoyable to answer.
+- The final line MUST be ONE clear, fun, inviting question.
 - End with EXACTLY ONE question mark (only one in the entire message).
-- The message must work equally for both users (no “you” that points to only one side).
 
 JSON:
 {"intro": "..."}
@@ -902,44 +775,40 @@ async def _insert_match_intro_messages(
     )
 
     if not intro_text:
-        intro_text = (
-            "You two might actually have a conversation that isn’t small talk. "
-            "What’s something you’ve been genuinely excited about lately?"
-        )
+        intro_text = "You two might actually have a conversation that isn’t small talk. What’s something you’ve been genuinely excited about lately?"
 
+    # ✅ IMPORTANT: insert TWO rows so this works even if receiver_user_id is NOT NULL
     await conn.execute(
         text(
             """
             insert into messages(
-                id,
-                conversation_id,
-                sender_bot_id,
-                receiver_user_id,
-                message_type,
-                content_text,
-                created_at,
-                delivered_at,
-                read_at
+              id,
+              conversation_id,
+              sender_bot_id,
+              receiver_user_id,
+              message_type,
+              content_text,
+              created_at,
+              delivered_at,
+              read_at
             )
             values
-              (gen_random_uuid(), :cid, :bot, null, 'match_intro', :txt, now(), now(), now())
+              (gen_random_uuid(), :cid::uuid, :bot::uuid, :ra::uuid, 'match_intro', :txt, now(), now(), now()),
+              (gen_random_uuid(), :cid::uuid, :bot::uuid, :rb::uuid, 'match_intro', :txt, now(), now(), now())
             """
         ),
         {
             "cid": conversation_id,
             "bot": str(SYSTEM_BOT_ID),
+            "ra": user_a_id,
+            "rb": user_b_id,
             "txt": intro_text,
         },
     )
 
 
-# ---------------------------
-# ROUTES
-# ---------------------------
 @router.get("/status")
-async def get_matching_status(
-    user_id: uuid.UUID = Depends(get_current_user_id),
-):
+async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id)):
     async with engine.begin() as conn:
         checks = await _get_checks(conn, user_id)
 
@@ -974,15 +843,7 @@ async def get_matching_status(
         if req_ok and next_iso:
             cooldown_row = (
                 await conn.execute(
-                    text(
-                        """
-                        select
-                          case
-                            when :nxt::timestamptz <= now() then true
-                            else false
-                          end as ok
-                        """
-                    ),
+                    text("select case when :nxt::timestamptz <= now() then true else false end as ok"),
                     {"nxt": next_iso},
                 )
             ).mappings().first()
@@ -997,9 +858,7 @@ async def get_matching_status(
         return {
             "eligible": eligible_now,
             "reason": reason,
-            "missing": built["missing"]
-            if not req_ok
-            else ([] if eligible_now else ["Please wait before requesting another match."]),
+            "missing": built["missing"] if not req_ok else ([] if eligible_now else ["Please wait before requesting another match."]),
             "checks": {
                 "verified": checks["verified"],
                 "assessment_completed": checks["assessment_completed"],
@@ -1014,13 +873,7 @@ async def get_matching_status(
 
 
 @router.post("/generate", response_model=MatchResult)
-async def generate_match(
-    user_id: uuid.UUID = Depends(get_current_user_id),
-):
-    """
-    FIX: Commit conversation first (TX#1), then insert intro message (TX#2).
-    This prevents losing the conversation if the server restarts mid-request.
-    """
+async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
     convo_id: Optional[str] = None
     a_id: Optional[str] = None
     b_id: Optional[str] = None
@@ -1030,35 +883,21 @@ async def generate_match(
     a_name: str = "You"
     b_name: str = "They"
 
-    # -----------------------
-    # TX #1: compute + create conversation (MUST persist)
-    # -----------------------
+    # TX #1: compute + create conversation
     async with engine.begin() as conn:
         ok_new, reason_new, _checks = await _is_user_eligible_new_checks(conn, user_id)
         if not ok_new:
-            return MatchResultIneligible(
-                status="ineligible",
-                user_id=str(user_id),
-                reason=reason_new or "not_eligible",
-            )
+            return MatchResultIneligible(status="ineligible", user_id=str(user_id), reason=reason_new or "not_eligible")
 
         a_row = await _fetch_user(conn, str(user_id))
 
         ok_old, reason_old = await _is_user_eligible_old_rules(conn, a_row)
         if not ok_old:
-            return MatchResultIneligible(
-                status="ineligible",
-                user_id=str(user_id),
-                reason=reason_old or "not_eligible",
-            )
+            return MatchResultIneligible(status="ineligible", user_id=str(user_id), reason=reason_old or "not_eligible")
 
         a_geo = await _fetch_user_geo(conn, a_row["id"])
         if not a_geo:
-            return MatchResultIneligible(
-                status="ineligible",
-                user_id=str(user_id),
-                reason="Set your location before requesting a match.",
-            )
+            return MatchResultIneligible(status="ineligible", user_id=str(user_id), reason="Set your location before requesting a match.")
 
         a_traits = await _personality_map(conn, a_row["id"])
         a_prefs = await _pref_map(conn, a_row["id"])
@@ -1096,24 +935,13 @@ async def generate_match(
             b_prefs = await _pref_map(conn, b_row["id"])
             b_interests = await _interests_set(conn, b_row["id"])
 
-            p_score = _personality_match_score(
-                a_traits=a_traits,
-                b_traits=b_traits,
-                a_prefs=a_prefs,
-                b_prefs=b_prefs,
-            )
-
+            p_score = _personality_match_score(a_traits=a_traits, b_traits=b_traits, a_prefs=a_prefs, b_prefs=b_prefs)
             i_score = _interest_score(a_interests, b_interests)
 
             if p_score is None and i_score is None:
                 continue
 
-            fs = _final_score(
-                a_user_row=a_row,
-                b_user_row=b_row,
-                personality_score=p_score,
-                interest_score=i_score,
-            )
+            fs = _final_score(a_user_row=a_row, b_user_row=b_row, personality_score=p_score, interest_score=i_score)
 
             if best_score_val is None or fs > best_score_val:
                 best_score_val = fs
@@ -1138,9 +966,7 @@ async def generate_match(
         b_id = best_candidate["id"]
         b_name = best_candidate.get("full_name") or "They"
 
-    # -----------------------
-    # TX #2: insert intro message (nice-to-have)
-    # -----------------------
+    # TX #2: insert intro message (non-fatal)
     if convo_id and a_id and b_id:
         try:
             async with engine.begin() as conn2:
