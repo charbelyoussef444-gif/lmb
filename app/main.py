@@ -29,7 +29,7 @@ from app.api.routes.assesment import router as assessment_router
 from app.api.routes import match_feedback
 from app.api.routes import reports
 
-# ✅ STATS (YOUR FILE)
+# Stats
 from app.api.routes.stats import router as stats_router
 
 
@@ -37,9 +37,24 @@ logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="LikeMinded API (MVP)")
 
+# ✅ PRODUCTION CORS: explicit origins only
+# Add/remove as needed.
+ALLOWED_ORIGINS = [
+    # Local dev
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+
+    # Your Vercel production domain (the stable one)
+    "https://lmf-2tsh.vercel.app",
+
+    # Your custom domain
+    "https://likeminded.chat",
+    "https://www.likeminded.chat",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TEMP
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -74,11 +89,8 @@ app.include_router(assessment_router)
 app.include_router(match_feedback.router)
 app.include_router(reports.router)
 
-# ✅ Stats
-# Exposes: GET /waitlist-count
-# If you want /stats/waitlist-count instead, add prefix="/stats" in stats.py
+# Stats
 app.include_router(stats_router)
-
 
 # -------------------
 # STARTUP PROBE
@@ -86,12 +98,20 @@ app.include_router(stats_router)
 
 @app.on_event("startup")
 async def _startup_probe():
+    # Log CORS
+    logger.info("[startup] CORS origins: %s", ALLOWED_ORIGINS)
+
+    # DB ping: should NOT kill the service if DB is down/misconfigured
     try:
         logger.info("[startup] DB driver: %s", engine.url.drivername)
         async with engine.begin() as conn:
             v = (await conn.execute(text("select 1"))).scalar_one()
             logger.info("[startup] DB ping OK: %s", v)
+    except Exception:
+        logger.exception("[startup] DB ping FAILED (service will still run)")
 
+    # Log routes
+    try:
         for r in app.routes:
             logger.info(
                 "Route loaded: %s %s",
@@ -99,4 +119,4 @@ async def _startup_probe():
                 getattr(r, "path", None),
             )
     except Exception:
-        logger.exception("[startup] DB ping FAILED")
+        logger.exception("[startup] Failed listing routes")
