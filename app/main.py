@@ -1,8 +1,10 @@
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
+from starlette.types import ASGIApp
 
 from app.db.engine import engine
 
@@ -40,7 +42,6 @@ app = FastAPI(title="LikeMinded API (MVP)")
 # CORS CONFIG
 # -------------------
 
-# Exact allowed origins
 ALLOWED_ORIGINS = {
     # Local dev
     "http://localhost:5173",
@@ -56,50 +57,76 @@ ALLOWED_ORIGINS = {
 
 
 def is_allowed_origin(origin: str | None) -> bool:
-    """
-    Dynamic origin validation.
-
-    Allows:
-    ✔ production domains
-    ✔ Vercel preview deployments
-    ✔ local dev
-    ✔ requests with no origin (health checks, server-to-server)
-    """
     if origin is None:
         return True
-
     if origin in ALLOWED_ORIGINS:
         return True
-
-    # allow Vercel preview deployments safely
     if origin.endswith(".vercel.app"):
         return True
-
     return False
 
 
-class DynamicCORSMiddleware(CORSMiddleware):
+def _cors_headers_for_origin(origin: str | None) -> dict:
+    """Return CORS headers if the origin is allowed, else empty dict."""
+    if not origin or not is_allowed_origin(origin):
+        return {}
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Methods": "*",
+        "Access-Control-Allow-Headers": "*",
+    }
+
+
+# -------------------
+# THREAD-SAFE CORS MIDDLEWARE
+# Avoids mutating shared state (self.allow_origins) on every request.
+# Creates a fresh CORSMiddleware per-request for allowed origins.
+# -------------------
+
+class DynamicCORSMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
+        if scope["type"] in ("http", "websocket"):
             headers = dict(scope.get("headers") or [])
-            origin = headers.get(b"origin")
+            origin = (headers.get(b"origin") or b"").decode() or None
 
-            if origin:
-                origin = origin.decode()
+            if is_allowed_origin(origin):
+                cors_app = CORSMiddleware(
+                    self.app,
+                    allow_origins=[origin] if origin else list(ALLOWED_ORIGINS),
+                    allow_credentials=True,
+                    allow_methods=["*"],
+                    allow_headers=["*"],
+                )
+                await cors_app(scope, receive, send)
+                return
 
-                if is_allowed_origin(origin):
-                    self.allow_origins = [origin]
-
-        await super().__call__(scope, receive, send)
+        await self.app(scope, receive, send)
 
 
-app.add_middleware(
-    DynamicCORSMiddleware,
-    allow_origins=list(ALLOWED_ORIGINS),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(DynamicCORSMiddleware)
+
+
+# -------------------
+# GLOBAL EXCEPTION HANDLER
+# Starlette's CORSMiddleware does NOT inject headers on 500 responses,
+# so we add them manually here to prevent the browser seeing a CORS error
+# when the real problem is a server crash.
+# -------------------
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    origin = request.headers.get("origin")
+    logger.exception("Unhandled exception on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers=_cors_headers_for_origin(origin),
+    )
+
 
 # -------------------
 # ROUTES
@@ -133,6 +160,7 @@ app.include_router(reports.router)
 # Stats
 app.include_router(stats_router)
 
+
 # -------------------
 # STARTUP PROBE
 # -------------------
@@ -140,11 +168,8 @@ app.include_router(stats_router)
 @app.on_event("startup")
 async def _startup_probe():
     logger.info("[startup] API starting…")
-
-    # Log CORS origins
     logger.info("[startup] Allowed CORS origins: %s", list(ALLOWED_ORIGINS))
 
-    # DB ping (non-fatal)
     try:
         logger.info("[startup] DB driver: %s", engine.url.drivername)
         async with engine.begin() as conn:
@@ -153,7 +178,6 @@ async def _startup_probe():
     except Exception:
         logger.exception("[startup] DB ping FAILED (service will still run)")
 
-    # List loaded routes (helps debug deployment issues)
     try:
         for r in app.routes:
             logger.info(
