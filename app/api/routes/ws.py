@@ -1,5 +1,6 @@
 # app/api/routes/ws.py
 import json
+import uuid
 from logging import getLogger
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -16,9 +17,17 @@ ws_router = APIRouter()
 
 @ws_router.websocket("/ws/conversations/{cid}")
 async def ws_conversation(ws: WebSocket, cid: str):
+    # 0) Validate CID
+    try:
+        cid_uuid = uuid.UUID(cid)
+    except Exception:
+        await ws.close(code=4400)  # Bad Request
+        return
+
     # 1) Auth
     try:
         user_id = await get_ws_user_id(ws)
+        user_uuid = uuid.UUID(str(user_id))
         log.info("WS connect ok: cid=%s user=%s", cid, user_id)
     except Exception:
         await ws.close(code=4401)  # Unauthorized
@@ -32,20 +41,20 @@ async def ws_conversation(ws: WebSocket, cid: str):
                     """
                     select id, user_a_id, user_b_id, active, type
                     from conversations
-                    where id::text = :cid
+                    where id = :cid
                       and active = true
                       and type = 'match'
                     """
                 ),
-                {"cid": cid},
+                {"cid": cid_uuid},
             )
         ).mappings().first()
 
-    if not conv or str(user_id) not in (str(conv["user_a_id"]), str(conv["user_b_id"])):
+    if not conv or user_uuid not in (conv["user_a_id"], conv["user_b_id"]):
         await ws.close(code=4403)  # Forbidden
         return
 
-    other = str(conv["user_b_id"]) if str(user_id) == str(conv["user_a_id"]) else str(conv["user_a_id"])
+    other_uuid = conv["user_b_id"] if user_uuid == conv["user_a_id"] else conv["user_a_id"]
 
     # 3) Join the room
     await manager.join(cid, ws)
@@ -53,7 +62,7 @@ async def ws_conversation(ws: WebSocket, cid: str):
 
     await manager.broadcast(
         cid,
-        {"type": "presence", "userId": str(user_id), "state": "joined"},
+        {"type": "presence", "userId": str(user_uuid), "state": "joined"},
         exclude=ws,
     )
 
@@ -84,52 +93,53 @@ async def ws_conversation(ws: WebSocket, cid: str):
                                 )
                                 values (
                                   gen_random_uuid(),
-                                  :cid::uuid,
-                                  :s::uuid,
-                                  :r::uuid,
+                                  :cid,
+                                  :s,
+                                  :r,
                                   'text',
                                   :t,
                                   now()
                                 )
                                 returning
                                   id::text as id,
-                                  conversation_id,
-                                  sender_user_id,
-                                  receiver_user_id,
+                                  conversation_id::text as conversation_id,
+                                  sender_user_id::text as sender_user_id,
+                                  receiver_user_id::text as receiver_user_id,
                                   content_text,
                                   created_at
                                 """
                             ),
                             {
-                                "cid": cid,
-                                "s": str(user_id),
-                                "r": other,
+                                "cid": cid_uuid,
+                                "s": user_uuid,
+                                "r": other_uuid,
                                 "t": text_body,
                             },
                         )
                     ).mappings().first()
 
-                await manager.broadcast(
-                    cid,
-                    {
-                        "type": "message-new",
-                        "data": {
-                            "id": row["id"],
-                            "conversation_id": str(row["conversation_id"]),
-                            "sender_user_id": str(row["sender_user_id"]),
-                            "receiver_user_id": str(row["receiver_user_id"]),
-                            "content_text": row["content_text"],
-                            "created_at": row["created_at"].isoformat(),
+                if row:
+                    await manager.broadcast(
+                        cid,
+                        {
+                            "type": "message-new",
+                            "data": {
+                                "id": row["id"],
+                                "conversation_id": row["conversation_id"],
+                                "sender_user_id": row["sender_user_id"],
+                                "receiver_user_id": row["receiver_user_id"],
+                                "content_text": row["content_text"],
+                                "created_at": row["created_at"].isoformat(),
+                            },
                         },
-                    },
-                )
+                    )
 
             elif typ == "typing":
                 await manager.broadcast(
                     cid,
                     {
                         "type": "typing",
-                        "userId": str(user_id),
+                        "userId": str(user_uuid),
                         "isTyping": bool(msg.get("isTyping")),
                     },
                     exclude=ws,
@@ -142,14 +152,14 @@ async def ws_conversation(ws: WebSocket, cid: str):
                             """
                             update messages
                             set read_at = now()
-                            where conversation_id::text = :cid
+                            where conversation_id = :cid
                               and receiver_user_id = :me
                               and read_at is null
                             """
                         ),
-                        {"cid": cid, "me": str(user_id)},
+                        {"cid": cid_uuid, "me": user_uuid},
                     )
-                await manager.broadcast(cid, {"type": "read", "userId": str(user_id)})
+                await manager.broadcast(cid, {"type": "read", "userId": str(user_uuid)})
 
             elif typ == "ping":
                 await ws.send_json({"type": "pong"})
@@ -160,6 +170,6 @@ async def ws_conversation(ws: WebSocket, cid: str):
         manager.leave(cid, ws)
         await manager.broadcast(
             cid,
-            {"type": "presence", "userId": str(user_id), "state": "left"},
+            {"type": "presence", "userId": str(user_uuid), "state": "left"},
             exclude=ws,
         )
