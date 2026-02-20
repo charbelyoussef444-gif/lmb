@@ -137,26 +137,28 @@ async def list_conversations(user_id: uuid.UUID = Depends(get_current_user_id)):
 
 @router.get("/{cid}/messages", response_model=List[MessageOut])
 async def get_thread(cid: str, user_id: uuid.UUID = Depends(get_current_user_id)):
+    # ✅ FIX: compare UUID ids using ::text to avoid prod binding issues
     q_conv = text(
         """
         select id, user_a_id, user_b_id
         from conversations
-        where id = :cid and type='match' and active = true
+        where id::text = :cid
+          and type = 'match'
+          and active = true
         """
     )
 
     q_msgs = text(
         """
         select
-          id::text,
+          id::text as id,
           sender_user_id,
-          sender_bot_id,
           receiver_user_id,
           message_type,
           content_text,
           created_at
         from messages
-        where conversation_id = :cid
+        where conversation_id::text = :cid
         order by created_at asc
         """
     )
@@ -172,22 +174,19 @@ async def get_thread(cid: str, user_id: uuid.UUID = Depends(get_current_user_id)
         rows = (await conn.execute(q_msgs, {"cid": cid})).mappings().all()
 
     out: List[MessageOut] = []
-
     for r in rows:
-        if r["message_type"] == "match_intro":
-            role = "system"
+        mt = (r["message_type"] or "").strip().lower()
+
+        if mt == "match_intro":
+            role: Literal["me", "them", "system"] = "system"
         else:
-            role = (
-                "me"
-                if str(r["sender_user_id"]) == str(user_id)
-                else "them"
-            )
+            role = "me" if str(r["sender_user_id"]) == str(user_id) else "them"
 
         out.append(
             MessageOut(
                 id=r["id"],
                 role=role,
-                text=r["content_text"],
+                text=r["content_text"] or "",
                 ts=int(r["created_at"].timestamp()),
                 kind=r["message_type"],
             )
@@ -202,11 +201,16 @@ async def send_message(
     body: SendMessageIn,
     user_id: uuid.UUID = Depends(get_current_user_id),
 ):
+    if not body.text or not body.text.strip():
+        raise HTTPException(400, "Message is empty")
+
     q_conv = text(
         """
         select id, user_a_id, user_b_id
         from conversations
-        where id = :cid and type='match' and active = true
+        where id::text = :cid
+          and type = 'match'
+          and active = true
         """
     )
 
@@ -218,12 +222,7 @@ async def send_message(
         if str(user_id) not in (str(conv["user_a_id"]), str(conv["user_b_id"])):
             raise HTTPException(403, "Not your conversation")
 
-        # ✅ FIXED TERNARY (THIS WAS YOUR ERROR)
-        other = (
-            conv["user_b_id"]
-            if str(user_id) == str(conv["user_a_id"])
-            else conv["user_a_id"]
-        )
+        other = conv["user_b_id"] if str(user_id) == str(conv["user_a_id"]) else conv["user_a_id"]
 
         row = (
             await conn.execute(
@@ -240,15 +239,15 @@ async def send_message(
                     )
                     values (
                         gen_random_uuid(),
-                        :cid,
-                        :s,
-                        :r,
+                        :cid::uuid,
+                        :s::uuid,
+                        :r::uuid,
                         'text',
                         :t,
                         now()
                     )
                     returning
-                        id::text,
+                        id::text as id,
                         conversation_id,
                         sender_user_id,
                         receiver_user_id,
@@ -256,12 +255,7 @@ async def send_message(
                         created_at
                     """
                 ),
-                {
-                    "cid": cid,
-                    "s": str(user_id),
-                    "r": str(other),
-                    "t": body.text,
-                },
+                {"cid": cid, "s": str(user_id), "r": str(other), "t": body.text.strip()},
             )
         ).mappings().first()
 
@@ -299,7 +293,9 @@ async def mark_read(cid: str, user_id: uuid.UUID = Depends(get_current_user_id))
         """
         select id, user_a_id, user_b_id
         from conversations
-        where id = :cid and type='match' and active = true
+        where id::text = :cid
+          and type = 'match'
+          and active = true
         """
     )
 
@@ -316,7 +312,7 @@ async def mark_read(cid: str, user_id: uuid.UUID = Depends(get_current_user_id))
                 """
                 update messages
                 set read_at = now()
-                where conversation_id = :cid
+                where conversation_id::text = :cid
                   and receiver_user_id = :me
                   and read_at is null
                   and message_type <> 'match_intro'
@@ -327,5 +323,36 @@ async def mark_read(cid: str, user_id: uuid.UUID = Depends(get_current_user_id))
 
     try:
         await manager.broadcast(cid, {"type": "read", "userId": str(user_id)})
+    except Exception:
+        pass
+
+
+@router.post("/{cid}/end", status_code=status.HTTP_204_NO_CONTENT)
+async def end_conversation(cid: str, user_id: uuid.UUID = Depends(get_current_user_id)):
+    q_conv = text(
+        """
+        select id, user_a_id, user_b_id
+        from conversations
+        where id::text = :cid
+          and type = 'match'
+          and active = true
+        """
+    )
+
+    async with engine.begin() as conn:
+        conv = (await conn.execute(q_conv, {"cid": cid})).mappings().first()
+        if not conv:
+            raise HTTPException(404, "Conversation not found")
+
+        if str(user_id) not in (str(conv["user_a_id"]), str(conv["user_b_id"])):
+            raise HTTPException(403, "Not your conversation")
+
+        await conn.execute(
+            text("update conversations set active = false where id::text = :cid"),
+            {"cid": cid},
+        )
+
+    try:
+        await manager.broadcast(cid, {"type": "ended", "conversation_id": cid})
     except Exception:
         pass
