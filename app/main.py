@@ -1,4 +1,3 @@
-# app/main.py
 import logging
 
 from fastapi import FastAPI
@@ -37,24 +36,66 @@ logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="LikeMinded API (MVP)")
 
-# ✅ PRODUCTION CORS: explicit origins only
-# Add/remove as needed.
-ALLOWED_ORIGINS = [
+# -------------------
+# CORS CONFIG
+# -------------------
+
+# Exact allowed origins
+ALLOWED_ORIGINS = {
     # Local dev
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 
-    # Your Vercel production domain (the stable one)
-    "https://lmf-2tsh.vercel.app",
-
-    # Your custom domain
+    # Production domains
     "https://likeminded.chat",
     "https://www.likeminded.chat",
-]
+
+    # Vercel production deployment
+    "https://lmf-2tsh.vercel.app",
+}
+
+
+def is_allowed_origin(origin: str | None) -> bool:
+    """
+    Dynamic origin validation.
+
+    Allows:
+    ✔ production domains
+    ✔ Vercel preview deployments
+    ✔ local dev
+    ✔ requests with no origin (health checks, server-to-server)
+    """
+    if origin is None:
+        return True
+
+    if origin in ALLOWED_ORIGINS:
+        return True
+
+    # allow Vercel preview deployments safely
+    if origin.endswith(".vercel.app"):
+        return True
+
+    return False
+
+
+class DynamicCORSMiddleware(CORSMiddleware):
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers") or [])
+            origin = headers.get(b"origin")
+
+            if origin:
+                origin = origin.decode()
+
+                if is_allowed_origin(origin):
+                    self.allow_origins = [origin]
+
+        await super().__call__(scope, receive, send)
+
 
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    DynamicCORSMiddleware,
+    allow_origins=list(ALLOWED_ORIGINS),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -98,10 +139,12 @@ app.include_router(stats_router)
 
 @app.on_event("startup")
 async def _startup_probe():
-    # Log CORS
-    logger.info("[startup] CORS origins: %s", ALLOWED_ORIGINS)
+    logger.info("[startup] API starting…")
 
-    # DB ping: should NOT kill the service if DB is down/misconfigured
+    # Log CORS origins
+    logger.info("[startup] Allowed CORS origins: %s", list(ALLOWED_ORIGINS))
+
+    # DB ping (non-fatal)
     try:
         logger.info("[startup] DB driver: %s", engine.url.drivername)
         async with engine.begin() as conn:
@@ -110,7 +153,7 @@ async def _startup_probe():
     except Exception:
         logger.exception("[startup] DB ping FAILED (service will still run)")
 
-    # Log routes
+    # List loaded routes (helps debug deployment issues)
     try:
         for r in app.routes:
             logger.info(
