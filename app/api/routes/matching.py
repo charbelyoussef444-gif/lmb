@@ -334,6 +334,10 @@ async def _count_pref_rows(conn, user_id: str) -> int:
 
 
 async def _already_matched(conn, a_id: str, b_id: str) -> bool:
+    # IMPORTANT: bind UUID as uuid.UUID and do NOT use :a::uuid casts inside text()
+    a_uuid = uuid.UUID(a_id)
+    b_uuid = uuid.UUID(b_id)
+
     row = (
         await conn.execute(
             text(
@@ -342,13 +346,13 @@ async def _already_matched(conn, a_id: str, b_id: str) -> bool:
                 from conversations
                 where type = 'match'
                   and (
-                        (user_a_id = :a::uuid and user_b_id = :b::uuid)
-                     or (user_a_id = :b::uuid and user_b_id = :a::uuid)
+                        (user_a_id = :a and user_b_id = :b)
+                     or (user_a_id = :b and user_b_id = :a)
                   )
                 limit 1
                 """
             ),
-            {"a": a_id, "b": b_id},
+            {"a": a_uuid, "b": b_uuid},
         )
     ).first()
     return row is not None
@@ -501,6 +505,9 @@ async def _is_user_eligible_new_checks(conn, user_id: uuid.UUID) -> Tuple[bool, 
 async def _fetch_candidate_pool(conn, a_user_id: str, a_lat: float, a_lng: float, a_max_km: float):
     min_required_prefs = int(TRAIT_COUNT_EXPECTED * MIN_PREF_COVERAGE)
 
+    # IMPORTANT: bind UUID as uuid.UUID and do NOT use :me::uuid
+    me_uuid = uuid.UUID(a_user_id)
+
     rows = (
         await conn.execute(
             text(
@@ -551,7 +558,7 @@ async def _fetch_candidate_pool(conn, a_user_id: str, a_lat: float, a_lng: float
                     join trait_counts tc on tc.user_id = u.id
                     join pref_counts  pc on pc.user_id = u.id
                     join locations lb on lb.id = u.location_id
-                    where u.id <> :me::uuid
+                    where u.id <> :me
                       and u.location_id is not null
                       and u.verified = true
                       and (u.active_chats < :max_chats)
@@ -583,12 +590,12 @@ async def _fetch_candidate_pool(conn, a_user_id: str, a_lat: float, a_lng: float
                 """
             ),
             {
-                "me": a_user_id,
+                "me": me_uuid,
                 "max_chats": MAX_ACTIVE_CHATS,
                 "trait_expected": TRAIT_COUNT_EXPECTED,
                 "pref_required": min_required_prefs,
-                "a_lat": a_lat,
-                "a_lng": a_lng,
+                "a_lat": float(a_lat),
+                "a_lng": float(a_lng),
                 "a_max_km": float(a_max_km),
                 "def_km": DEFAULT_MAX_DISTANCE_KM,
                 "R": EARTH_RADIUS_KM,
@@ -600,7 +607,10 @@ async def _fetch_candidate_pool(conn, a_user_id: str, a_lat: float, a_lng: float
 
 
 async def _create_conversation_and_stamp(conn, a_id: str, b_id: str, match_score: float, match_distance_km: Optional[float]) -> str:
-    new_cid = str(uuid.uuid4())
+    # IMPORTANT: bind UUID as uuid.UUID and do NOT use :x::uuid in text()
+    new_cid_uuid = uuid.uuid4()
+    a_uuid = uuid.UUID(a_id)
+    b_uuid = uuid.UUID(b_id)
 
     await conn.execute(
         text(
@@ -611,17 +621,17 @@ async def _create_conversation_and_stamp(conn, a_id: str, b_id: str, match_score
                 created_at, updated_at
             )
             values (
-                :cid::uuid, 'match', :a::uuid, :b::uuid, true,
+                :cid, 'match', :a, :b, true,
                 :ms, :md,
                 now(), now()
             )
             """
         ),
         {
-            "cid": new_cid,
-            "a": a_id,
-            "b": b_id,
-            "ms": match_score,
+            "cid": new_cid_uuid,
+            "a": a_uuid,
+            "b": b_uuid,
+            "ms": float(match_score),
             "md": float(match_distance_km) if match_distance_km is not None else None,
         },
     )
@@ -632,10 +642,10 @@ async def _create_conversation_and_stamp(conn, a_id: str, b_id: str, match_score
             update users
             set last_match_date = now(),
                 updated_at = now()
-            where id in (:a::uuid, :b::uuid)
+            where id = :a or id = :b
             """
         ),
-        {"a": a_id, "b": b_id},
+        {"a": a_uuid, "b": b_uuid},
     )
 
     await conn.execute(
@@ -644,10 +654,10 @@ async def _create_conversation_and_stamp(conn, a_id: str, b_id: str, match_score
             update users
             set active_chats = active_chats + 1,
                 updated_at = now()
-            where id in (:a::uuid, :b::uuid)
+            where id = :a or id = :b
             """
         ),
-        {"a": a_id, "b": b_id},
+        {"a": a_uuid, "b": b_uuid},
     )
 
     chk = (
@@ -656,19 +666,19 @@ async def _create_conversation_and_stamp(conn, a_id: str, b_id: str, match_score
                 """
                 select id
                 from conversations
-                where id::text = :cid
-                  and type='match'
+                where id = :cid
+                  and type = 'match'
                   and active = true
                 """
             ),
-            {"cid": new_cid},
+            {"cid": new_cid_uuid},
         )
     ).first()
 
     if not chk:
         raise RuntimeError("Conversation insert sanity check failed.")
 
-    return new_cid
+    return str(new_cid_uuid)
 
 
 GPT_MATCH_INTRO_SYSTEM_PROMPT = """
@@ -793,7 +803,11 @@ async def _insert_match_intro_messages(
     if not intro_text:
         intro_text = "You two might actually have a conversation that isn’t small talk. What’s something you’ve been genuinely excited about lately?"
 
-    # ✅ IMPORTANT: insert TWO rows so this works even if receiver_user_id is NOT NULL
+    cid_uuid = uuid.UUID(conversation_id)
+    ra_uuid = uuid.UUID(user_a_id)
+    rb_uuid = uuid.UUID(user_b_id)
+
+    # IMPORTANT: bind UUIDs as uuid.UUID and do NOT use :x::uuid casts
     await conn.execute(
         text(
             """
@@ -809,15 +823,15 @@ async def _insert_match_intro_messages(
               read_at
             )
             values
-              (gen_random_uuid(), :cid::uuid, :bot::uuid, :ra::uuid, 'match_intro', :txt, now(), now(), now()),
-              (gen_random_uuid(), :cid::uuid, :bot::uuid, :rb::uuid, 'match_intro', :txt, now(), now(), now())
+              (gen_random_uuid(), :cid, :bot, :ra, 'match_intro', :txt, now(), now(), now()),
+              (gen_random_uuid(), :cid, :bot, :rb, 'match_intro', :txt, now(), now(), now())
             """
         ),
         {
-            "cid": conversation_id,
-            "bot": str(SYSTEM_BOT_ID),
-            "ra": user_a_id,
-            "rb": user_b_id,
+            "cid": cid_uuid,
+            "bot": SYSTEM_BOT_ID,
+            "ra": ra_uuid,
+            "rb": rb_uuid,
             "txt": intro_text,
         },
     )
