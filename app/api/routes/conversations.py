@@ -40,6 +40,26 @@ class SendMessageIn(BaseModel):
     text: str
 
 
+# ✅ NEW: Match feedback / photos endpoints (to fix your frontend 404s)
+class MatchFeedbackStatusOut(BaseModel):
+    conversation_id: str
+    is_24h_passed: bool
+    already_answered: bool
+    should_prompt: bool
+    my_response: Optional[bool] = None
+
+
+class MatchFeedbackIn(BaseModel):
+    response: bool
+
+
+class MatchFeedbackResultOut(BaseModel):
+    conversation_id: str
+    saved: bool
+    both_yes: bool
+    photos_unlocked: bool
+
+
 # ---------------------------
 # Helpers
 # ---------------------------
@@ -287,6 +307,7 @@ async def send_message(
     )
 
 
+# ✅ FIX: remove "active = true" restriction so read works even if convo ended
 @router.post("/{cid}/read", status_code=status.HTTP_204_NO_CONTENT)
 async def mark_read(cid: str, user_id: uuid.UUID = Depends(get_current_user_id)):
     q_conv = text(
@@ -295,7 +316,6 @@ async def mark_read(cid: str, user_id: uuid.UUID = Depends(get_current_user_id))
         from conversations
         where id::text = :cid
           and type = 'match'
-          and active = true
         """
     )
 
@@ -327,6 +347,7 @@ async def mark_read(cid: str, user_id: uuid.UUID = Depends(get_current_user_id))
         pass
 
 
+# ✅ FIX: decrement users.active_chats for both sides when ending chat
 @router.post("/{cid}/end", status_code=status.HTTP_204_NO_CONTENT)
 async def end_conversation(cid: str, user_id: uuid.UUID = Depends(get_current_user_id)):
     q_conv = text(
@@ -347,12 +368,113 @@ async def end_conversation(cid: str, user_id: uuid.UUID = Depends(get_current_us
         if str(user_id) not in (str(conv["user_a_id"]), str(conv["user_b_id"])):
             raise HTTPException(403, "Not your conversation")
 
+        a = str(conv["user_a_id"])
+        b = str(conv["user_b_id"])
+
+        # 1) end the conversation
         await conn.execute(
-            text("update conversations set active = false where id::text = :cid"),
+            text("update conversations set active = false, updated_at = now() where id::text = :cid"),
             {"cid": cid},
+        )
+
+        # 2) ✅ decrement active_chats for BOTH users
+        await conn.execute(
+            text(
+                """
+                update users
+                set active_chats = greatest(coalesce(active_chats, 0) - 1, 0),
+                    updated_at = now()
+                where id::text = :a or id::text = :b
+                """
+            ),
+            {"a": a, "b": b},
         )
 
     try:
         await manager.broadcast(cid, {"type": "ended", "conversation_id": cid})
     except Exception:
         pass
+
+
+# ---------------------------
+# ✅ Missing endpoints to stop frontend 404s
+# ---------------------------
+
+@router.get("/{cid}/photos", response_model=List[str])
+async def conversation_photos(cid: str, user_id: uuid.UUID = Depends(get_current_user_id)):
+    q_conv = text(
+        """
+        select id, user_a_id, user_b_id
+        from conversations
+        where id::text = :cid
+          and type = 'match'
+        """
+    )
+
+    async with engine.begin() as conn:
+        conv = (await conn.execute(q_conv, {"cid": cid})).mappings().first()
+        if not conv:
+            raise HTTPException(404, "Conversation not found")
+
+        if str(user_id) not in (str(conv["user_a_id"]), str(conv["user_b_id"])):
+            raise HTTPException(403, "Not your conversation")
+
+    # TODO: implement unlock logic + signed URLs later
+    return []
+
+
+@router.get("/{cid}/match-feedback/status", response_model=MatchFeedbackStatusOut)
+async def match_feedback_status(cid: str, user_id: uuid.UUID = Depends(get_current_user_id)):
+    q_conv = text(
+        """
+        select id, user_a_id, user_b_id, created_at
+        from conversations
+        where id::text = :cid
+          and type = 'match'
+        """
+    )
+
+    async with engine.begin() as conn:
+        conv = (await conn.execute(q_conv, {"cid": cid})).mappings().first()
+        if not conv:
+            raise HTTPException(404, "Conversation not found")
+
+        if str(user_id) not in (str(conv["user_a_id"]), str(conv["user_b_id"])):
+            raise HTTPException(403, "Not your conversation")
+
+    # Minimal for now: don't prompt
+    return MatchFeedbackStatusOut(
+        conversation_id=cid,
+        is_24h_passed=False,
+        already_answered=False,
+        should_prompt=False,
+        my_response=None,
+    )
+
+
+@router.post("/{cid}/match-feedback", response_model=MatchFeedbackResultOut)
+async def submit_match_feedback(cid: str, body: MatchFeedbackIn, user_id: uuid.UUID = Depends(get_current_user_id)):
+    q_conv = text(
+        """
+        select id, user_a_id, user_b_id
+        from conversations
+        where id::text = :cid
+          and type = 'match'
+        """
+    )
+
+    async with engine.begin() as conn:
+        conv = (await conn.execute(q_conv, {"cid": cid})).mappings().first()
+        if not conv:
+            raise HTTPException(404, "Conversation not found")
+
+        if str(user_id) not in (str(conv["user_a_id"]), str(conv["user_b_id"])):
+            raise HTTPException(403, "Not your conversation")
+
+    # TODO: store feedback + unlock logic later
+    return MatchFeedbackResultOut(
+        conversation_id=cid,
+        saved=True,
+        both_yes=False,
+        photos_unlocked=False,
+    )
