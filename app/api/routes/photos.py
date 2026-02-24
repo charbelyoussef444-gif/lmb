@@ -37,15 +37,76 @@ async def upload_gallery_photo(
     path = await upload_file(file, key)
 
     async with engine.begin() as conn:
-        row = (await conn.execute(text("""
+        row = (
+            await conn.execute(
+                text(
+                    """
             INSERT INTO user_photos (id, user_id, kind, photo_url, position, created_at)
             VALUES (gen_random_uuid(), :uid, 'gallery', :url, :pos, now())
             ON CONFLICT (user_id, kind, position)
             DO UPDATE SET photo_url = EXCLUDED.photo_url
             RETURNING id::text;
-        """), {"uid": str(user_id), "url": path, "pos": position})).mappings().first()
+        """
+                ),
+                {"uid": str(user_id), "url": path, "pos": position},
+            )
+        ).mappings().first()
 
     return {"ok": True, "photo_id": row["id"], "path": path}
+
+
+@me_photos_router.delete("/gallery/{position}", status_code=204)
+async def delete_gallery_photo(
+    position: int,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+):
+    if position not in (1, 2, 3):
+        raise HTTPException(400, "position must be 1, 2, or 3")
+
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    """
+                    SELECT photo_url
+                    FROM user_photos
+                    WHERE user_id = :uid
+                      AND kind = 'gallery'
+                      AND position = :pos
+                    LIMIT 1;
+                    """
+                ),
+                {"uid": str(user_id), "pos": position},
+            )
+        ).mappings().first()
+
+        # if it's already empty, treat as success
+        if not row:
+            return
+
+        photo_url = row["photo_url"]
+
+        await conn.execute(
+            text(
+                """
+                DELETE FROM user_photos
+                WHERE user_id = :uid
+                  AND kind = 'gallery'
+                  AND position = :pos;
+                """
+            ),
+            {"uid": str(user_id), "pos": position},
+        )
+
+    # best-effort delete from storage (don't fail request if storage fails)
+    try:
+        bucket = sb.storage.from_(settings.STORAGE_BUCKET)
+        # supabase-py expects a list of paths
+        bucket.remove([photo_url])
+    except Exception:
+        pass
+
+    return
 
 
 @me_photos_router.post("/verification", response_model=UploadResult)
@@ -57,11 +118,18 @@ async def upload_verification_id(
     path = await upload_file(file, key)
 
     async with engine.begin() as conn:
-        row = (await conn.execute(text("""
+        row = (
+            await conn.execute(
+                text(
+                    """
             INSERT INTO user_photos (id, user_id, kind, photo_url, position, created_at)
             VALUES (gen_random_uuid(), :uid, 'verification', :url, NULL, now())
             RETURNING id::text;
-        """), {"uid": str(user_id), "url": path})).mappings().first()
+        """
+                ),
+                {"uid": str(user_id), "url": path},
+            )
+        ).mappings().first()
 
     return {"ok": True, "photo_id": row["id"], "path": path}
 
@@ -70,26 +138,42 @@ async def upload_verification_id(
 async def list_my_photos(user_id: uuid.UUID = Depends(get_current_user_id)):
     """
     Return signed URLs for MY gallery photos based on user_photos.photo_url.
+
+    IMPORTANT: returns a fixed 3-slot array aligned to positions 1..3:
+    [slot1_url_or_empty, slot2_url_or_empty, slot3_url_or_empty]
     """
     async with engine.begin() as conn:
-        rows = (await conn.execute(text("""
-            SELECT photo_url
+        rows = (
+            await conn.execute(
+                text(
+                    """
+            SELECT position, photo_url
             FROM user_photos
             WHERE user_id = :uid
               AND kind = 'gallery'
-            ORDER BY position NULLS LAST, created_at ASC;
-        """), {"uid": str(user_id)})).mappings().all()
+              AND position IN (1,2,3)
+            ORDER BY position ASC;
+        """
+                ),
+                {"uid": str(user_id)},
+            )
+        ).mappings().all()
 
     bucket = sb.storage.from_(settings.STORAGE_BUCKET)
-    urls: list[str] = []
 
-    # 7 days (good balance: stable UX, still not “forever”)
-    expires_in = 60 * 60 * 24 * 7
+    expires_in = 60 * 60 * 24 * 7  # 7 days
+
+    # fixed slots
+    out = ["", "", ""]  # position 1..3
 
     for r in rows:
+        pos = int(r["position"] or 0)
+        if pos not in (1, 2, 3):
+            continue
         signed = bucket.create_signed_url(path=r["photo_url"], expires_in=expires_in)
-        urls.append(signed["signedURL"])
-    return urls
+        out[pos - 1] = signed["signedURL"]
+
+    return out
 
 
 # ----------------------------
@@ -108,14 +192,21 @@ async def list_conversation_photos(
     If no unlock rows exist yet, this returns [].
     """
     async with engine.begin() as conn:
-        conv = (await conn.execute(text("""
+        conv = (
+            await conn.execute(
+                text(
+                    """
             SELECT id, user_a_id, user_b_id
             FROM conversations
             WHERE id = :cid
               AND type = 'match'
               AND active = true
               AND user_b_id IS NOT NULL
-        """), {"cid": cid})).mappings().first()
+        """
+                ),
+                {"cid": cid},
+            )
+        ).mappings().first()
 
         if not conv:
             raise HTTPException(404, "Conversation not found")
@@ -123,14 +214,21 @@ async def list_conversation_photos(
         if str(user_id) not in (str(conv["user_a_id"]), str(conv["user_b_id"])):
             raise HTTPException(403, "Not your conversation")
 
-        rows = (await conn.execute(text("""
+        rows = (
+            await conn.execute(
+                text(
+                    """
             SELECT p.photo_url
             FROM conversation_photo_access a
             JOIN user_photos p ON p.id = a.photo_id
             WHERE a.conversation_id = :cid
               AND p.kind = 'gallery'
             ORDER BY p.position NULLS LAST, p.created_at ASC;
-        """), {"cid": cid})).mappings().all()
+        """
+                ),
+                {"cid": cid},
+            )
+        ).mappings().all()
 
     bucket = sb.storage.from_(settings.STORAGE_BUCKET)
     urls: list[str] = []
