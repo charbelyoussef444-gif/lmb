@@ -20,6 +20,9 @@ FLAG_EVENTS = {
     "subscription_active",
 }
 
+# Events that count as "active" (last_active = latest of these OR last sent message)
+ACTIVITY_EVENTS = sorted(set(FLAG_EVENTS))
+
 INACTIVITY_BAN_DAYS = 7
 
 
@@ -74,9 +77,13 @@ async def admin_user_summary(
         if not u:
             raise HTTPException(404, "User not found")
 
-        # FIX: RowMapping is immutable
+        # RowMapping is immutable
         u = dict(u)
 
+        # last_active should reflect meaningful activity:
+        # - last relevant event (match_opened / message_sent / etc.)
+        # - OR last sent message (messages.sender_user_id)
+        # NOT last_login_at
         last_active_row = (
             await conn.execute(
                 text(
@@ -86,12 +93,12 @@ async def admin_user_summary(
                         select max(ts) as ts
                         from events
                         where user_id = :tid
+                          and event_name = any(:activity_events::text[])
                       ),
                       last_msg as (
                         select max(created_at) as ts
                         from messages
                         where sender_user_id = :tid
-                           or receiver_user_id = :tid
                       ),
                       base as (
                         select
@@ -100,7 +107,6 @@ async def admin_user_summary(
                           u.banned,
                           u.created_at,
                           greatest(
-                            coalesce(u.last_login_at, to_timestamp(0)),
                             coalesce((select ts from last_event), to_timestamp(0)),
                             coalesce((select ts from last_msg), to_timestamp(0))
                           ) as raw_last_active
@@ -133,7 +139,7 @@ async def admin_user_summary(
                     from computed
                     """
                 ),
-                {"tid": str(target_user_id)},
+                {"tid": str(target_user_id), "activity_events": ACTIVITY_EVENTS},
             )
         ).mappings().first()
 
