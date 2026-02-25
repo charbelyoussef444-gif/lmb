@@ -1,3 +1,4 @@
+# app/api/routes/conversations.py
 import uuid
 from datetime import datetime
 from typing import List, Optional, Literal
@@ -26,6 +27,9 @@ class ConversationOut(BaseModel):
     lastAt: Optional[str] = None
     compatibility: Optional[float] = None
     unread: int = 0
+
+    # ✅ NEW: partner's computed last active (ISO string)
+    partnerLastActive: Optional[str] = None
 
 
 class MessageOut(BaseModel):
@@ -124,7 +128,20 @@ async def list_conversations(user_id: uuid.UUID = Depends(get_current_user_id)):
           lm.content_text as last_message,
           lm.created_at as last_at_ts,
           mc.match_score as compatibility,
-          coalesce(un.unread_count, 0) as unread
+          coalesce(un.unread_count, 0) as unread,
+
+          -- ✅ partner last active (same logic as admin summary)
+          greatest(
+            coalesce(u.last_login_at, to_timestamp(0)),
+            coalesce((select max(ts) from events e where e.user_id = mc.partner_id), to_timestamp(0)),
+            coalesce((
+              select max(m2.created_at)
+              from messages m2
+              where m2.sender_user_id = mc.partner_id
+                 or m2.receiver_user_id = mc.partner_id
+            ), to_timestamp(0))
+          ) as partner_last_active_ts
+
         from my_convos mc
         join users u on u.id = mc.partner_id
         left join last_msg lm on lm.conversation_id = mc.id
@@ -139,6 +156,18 @@ async def list_conversations(user_id: uuid.UUID = Depends(get_current_user_id)):
     out: List[ConversationOut] = []
     for r in rows:
         lastAt = _humanize_relative(r["last_at_ts"]) if r["last_at_ts"] else None
+
+        partner_last_active_ts = r.get("partner_last_active_ts")
+        partnerLastActive = None
+        if partner_last_active_ts is not None:
+            # if no activity ever exists, greatest() can still be epoch; keep it as None
+            # (prevents showing 1970 in UI)
+            try:
+                if partner_last_active_ts != datetime.fromtimestamp(0):
+                    partnerLastActive = partner_last_active_ts.isoformat()
+            except Exception:
+                partnerLastActive = None
+
         out.append(
             ConversationOut(
                 id=r["id"],
@@ -149,6 +178,7 @@ async def list_conversations(user_id: uuid.UUID = Depends(get_current_user_id)):
                 lastAt=lastAt,
                 compatibility=r["compatibility"],
                 unread=r["unread"],
+                partnerLastActive=partnerLastActive,
             )
         )
 
