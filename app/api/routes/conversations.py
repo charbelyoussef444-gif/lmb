@@ -29,6 +29,10 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 PHOTO_UNLOCK_HOURS = 24
 
+# ✅ Supabase table name + timestamp column name (matches your screenshot)
+MATCH_FEEDBACK_TABLE = "conversation_match_feedback"
+MATCH_FEEDBACK_TS_COL = "responded_at"
+
 
 # ---------------------------
 # Models
@@ -120,12 +124,13 @@ def _is_member(conv, me: uuid.UUID) -> bool:
 
 
 async def _get_my_feedback(conn, cid: str, me: uuid.UUID) -> Optional[bool]:
+  # ✅ uses real table name
   row = (
     await conn.execute(
       text(
-        """
+        f"""
         select response
-        from match_feedback
+        from {MATCH_FEEDBACK_TABLE}
         where conversation_id::text = :cid
           and user_id::text = :me
         """
@@ -133,6 +138,7 @@ async def _get_my_feedback(conn, cid: str, me: uuid.UUID) -> Optional[bool]:
       {"cid": cid, "me": str(me)},
     )
   ).mappings().first()
+
   if not row:
     return None
   return bool(row["response"])
@@ -146,9 +152,9 @@ async def _get_both_feedback(conn, cid: str, conv) -> dict:
   rows = (
     await conn.execute(
       text(
-        """
+        f"""
         select user_id::text as uid, response
-        from match_feedback
+        from {MATCH_FEEDBACK_TABLE}
         where conversation_id::text = :cid
           and (user_id::text = :a or user_id::text = :b)
         """
@@ -167,7 +173,6 @@ async def _get_both_feedback(conn, cid: str, conv) -> dict:
 
 
 def _is_24h_passed(conv_created_at: datetime) -> bool:
-  # conv_created_at is usually tz-aware; comparing in UTC-safe way
   now = datetime.utcnow()
   created = conv_created_at.replace(tzinfo=None)
   return (now - created) >= timedelta(hours=PHOTO_UNLOCK_HOURS)
@@ -193,7 +198,6 @@ async def _get_user_photo_paths(conn, user_id: str) -> List[str]:
     )
   ).scalars().all()
 
-  # filter null/empty
   paths = [p for p in rows if isinstance(p, str) and p.strip()]
   return paths
 
@@ -202,7 +206,6 @@ def _signed_urls(paths: List[str]) -> List[str]:
   if not paths:
     return []
   if supabase is None:
-    # If you see this, you forgot SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY env vars.
     return []
 
   out: List[str] = []
@@ -211,7 +214,6 @@ def _signed_urls(paths: List[str]) -> List[str]:
   for p in paths:
     try:
       signed = bucket.create_signed_url(p, SUPABASE_SIGN_SECONDS)
-      # supabase-py returns dict with key "signedURL" in most versions
       url = (signed or {}).get("signedURL") or (signed or {}).get("signedUrl")
       if url:
         out.append(url)
@@ -560,7 +562,7 @@ async def end_conversation(cid: str, user_id: uuid.UUID = Depends(get_current_us
 
 
 # ---------------------------
-# ✅ Photos + Feedback (FIXED)
+# ✅ Photos + Feedback (FIXED for your Supabase table)
 # ---------------------------
 
 @router.get("/{cid}/match-feedback/status", response_model=MatchFeedbackStatusOut)
@@ -592,14 +594,14 @@ async def submit_match_feedback(cid: str, body: MatchFeedbackIn, user_id: uuid.U
     if not _is_member(conv, user_id):
       raise HTTPException(403, "Not your conversation")
 
-    # upsert my response
+    # ✅ upsert using real table + real timestamp column
     await conn.execute(
       text(
-        """
-        insert into match_feedback(conversation_id, user_id, response, created_at)
+        f"""
+        insert into {MATCH_FEEDBACK_TABLE}(conversation_id, user_id, response, {MATCH_FEEDBACK_TS_COL})
         values (:cid::uuid, :uid::uuid, :resp, now())
         on conflict (conversation_id, user_id)
-        do update set response = excluded.response, created_at = now()
+        do update set response = excluded.response, {MATCH_FEEDBACK_TS_COL} = now()
         """
       ),
       {"cid": cid, "uid": str(user_id), "resp": bool(body.response)},
@@ -614,7 +616,6 @@ async def submit_match_feedback(cid: str, body: MatchFeedbackIn, user_id: uuid.U
 
     photos_unlocked = bool(passed and both_yes)
 
-  # notify clients when unlock happens
   if photos_unlocked:
     try:
       await manager.broadcast(cid, {"type": "photos-unlocked", "conversation_id": cid})
@@ -641,12 +642,10 @@ async def conversation_photos(cid: str, user_id: uuid.UUID = Depends(get_current
 
     both_yes = (both["a"] is True) and (both["b"] is True)
 
-    # 🔒 locked unless time passed + both yes
     if not (passed and both_yes):
       return []
 
     partner = _partner_id(conv, user_id)
     paths = await _get_user_photo_paths(conn, partner)
 
-  # sign outside db tx
   return _signed_urls(paths)
