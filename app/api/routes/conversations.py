@@ -12,8 +12,6 @@ from app.db.engine import engine
 from app.deps.auth import get_current_user_id
 from app.realtime.manager import manager
 
-# ---- Supabase (signed URLs) ----
-# pip install supabase
 from supabase import create_client  # type: ignore
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
@@ -29,7 +27,7 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 PHOTO_UNLOCK_HOURS = 24
 
-# ✅ Supabase table name + timestamp column name (matches your screenshot)
+# ✅ Your actual Supabase table/column names
 MATCH_FEEDBACK_TABLE = "conversation_match_feedback"
 MATCH_FEEDBACK_TS_COL = "responded_at"
 
@@ -124,7 +122,6 @@ def _is_member(conv, me: uuid.UUID) -> bool:
 
 
 async def _get_my_feedback(conn, cid: str, me: uuid.UUID) -> Optional[bool]:
-  # ✅ uses real table name
   row = (
     await conn.execute(
       text(
@@ -145,7 +142,6 @@ async def _get_my_feedback(conn, cid: str, me: uuid.UUID) -> Optional[bool]:
 
 
 async def _get_both_feedback(conn, cid: str, conv) -> dict:
-  # returns {"a": Optional[bool], "b": Optional[bool]}
   a = str(conv["user_a_id"])
   b = str(conv["user_b_id"])
 
@@ -179,11 +175,6 @@ def _is_24h_passed(conv_created_at: datetime) -> bool:
 
 
 async def _get_user_photo_paths(conn, user_id: str) -> List[str]:
-  """
-  IMPORTANT: Change this query if your table/column differs.
-  This expects: user_photos(user_id, storage_path, created_at)
-  storage_path example: "0125a825-.../1-abc.jpg"
-  """
   rows = (
     await conn.execute(
       text(
@@ -198,8 +189,7 @@ async def _get_user_photo_paths(conn, user_id: str) -> List[str]:
     )
   ).scalars().all()
 
-  paths = [p for p in rows if isinstance(p, str) and p.strip()]
-  return paths
+  return [p for p in rows if isinstance(p, str) and p.strip()]
 
 
 def _signed_urls(paths: List[str]) -> List[str]:
@@ -562,7 +552,7 @@ async def end_conversation(cid: str, user_id: uuid.UUID = Depends(get_current_us
 
 
 # ---------------------------
-# ✅ Photos + Feedback (FIXED for your Supabase table)
+# ✅ Photos + Feedback (FIXED)
 # ---------------------------
 
 @router.get("/{cid}/match-feedback/status", response_model=MatchFeedbackStatusOut)
@@ -589,31 +579,36 @@ async def match_feedback_status(cid: str, user_id: uuid.UUID = Depends(get_curre
 
 @router.post("/{cid}/match-feedback", response_model=MatchFeedbackResultOut)
 async def submit_match_feedback(cid: str, body: MatchFeedbackIn, user_id: uuid.UUID = Depends(get_current_user_id)):
+  # ✅ convert cid to UUID once; fail fast if frontend sends garbage
+  try:
+    cid_uuid = uuid.UUID(cid)
+  except Exception:
+    raise HTTPException(400, "Invalid conversation id")
+
   async with engine.begin() as conn:
     conv = await _get_conversation_or_404(conn, cid)
     if not _is_member(conv, user_id):
       raise HTTPException(403, "Not your conversation")
 
-    # ✅ upsert using real table + real timestamp column
+    # ✅ NO SQL CASTS. Avoids the asyncpg ":" parsing issue completely.
     await conn.execute(
       text(
         f"""
-        insert into {MATCH_FEEDBACK_TABLE}(conversation_id, user_id, response, {MATCH_FEEDBACK_TS_COL})
-        values (:cid::uuid, :uid::uuid, :resp, now())
+        insert into {MATCH_FEEDBACK_TABLE} (conversation_id, user_id, response, {MATCH_FEEDBACK_TS_COL})
+        values (:cid, :uid, :resp, now())
         on conflict (conversation_id, user_id)
-        do update set response = excluded.response, {MATCH_FEEDBACK_TS_COL} = now()
+        do update
+          set response = excluded.response,
+              {MATCH_FEEDBACK_TS_COL} = now()
         """
       ),
-      {"cid": cid, "uid": str(user_id), "resp": bool(body.response)},
+      {"cid": cid_uuid, "uid": user_id, "resp": bool(body.response)},
     )
 
     passed = _is_24h_passed(conv["created_at"])
     both = await _get_both_feedback(conn, cid, conv)
 
-    a_yes = both["a"] is True
-    b_yes = both["b"] is True
-    both_yes = a_yes and b_yes
-
+    both_yes = (both["a"] is True) and (both["b"] is True)
     photos_unlocked = bool(passed and both_yes)
 
   if photos_unlocked:
