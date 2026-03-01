@@ -12,12 +12,14 @@ from app.db.engine import engine
 from app.deps.auth import get_current_user_id
 from app.realtime.manager import manager
 
-# ---- Supabase (signed URLs) ----
+# Supabase signing (optional but recommended if bucket is private)
 from supabase import create_client  # type: ignore
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-SUPABASE_GALLERY_BUCKET = os.getenv("SUPABASE_GALLERY_BUCKET", "gallery").strip() or "gallery"
+
+# ✅ your bucket (from screenshot)
+SUPABASE_PHOTOS_BUCKET = os.getenv("SUPABASE_PHOTOS_BUCKET", "user-photos").strip() or "user-photos"
 SUPABASE_SIGN_SECONDS = int(os.getenv("SUPABASE_SIGN_SECONDS", "3600"))
 
 supabase = None
@@ -28,7 +30,7 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 PHOTO_UNLOCK_HOURS = 24
 
-# ✅ Your actual feedback table/col names
+# ✅ your feedback table/col names (from screenshot earlier)
 MATCH_FEEDBACK_TABLE = "conversation_match_feedback"
 MATCH_FEEDBACK_TS_COL = "responded_at"
 
@@ -174,10 +176,16 @@ def _is_24h_passed(conv_created_at: datetime) -> bool:
   return (now - created) >= timedelta(hours=PHOTO_UNLOCK_HOURS)
 
 
-async def _get_user_photo_urls(conn, user_id: str) -> List[str]:
+async def _get_user_photo_keys_or_urls(conn, user_id: str) -> List[str]:
   """
-  ✅ Matches your schema:
-  public.user_photos(photo_url text not null, position integer null)
+  Your table:
+    public.user_photos(photo_url text not null, position int null)
+
+  In your case, photo_url is behaving like a STORAGE KEY such as:
+    {user_id}/gallery/1-xxxx.bin
+  (from your Supabase bucket screenshot)
+
+  If later you store full https:// URLs, this code still works.
   """
   rows = (
     await conn.execute(
@@ -193,20 +201,44 @@ async def _get_user_photo_urls(conn, user_id: str) -> List[str]:
     )
   ).scalars().all()
 
-  return [u for u in rows if isinstance(u, str) and u.strip()]
+  return [x.strip() for x in rows if isinstance(x, str) and x.strip()]
 
 
-def _signed_or_passthrough(urls: List[str]) -> List[str]:
+def _sign_storage_key(bucket_name: str, key: str) -> Optional[str]:
+  if supabase is None:
+    return None
+  try:
+    bucket = supabase.storage.from_(bucket_name)
+    signed = bucket.create_signed_url(key, SUPABASE_SIGN_SECONDS)
+    return (signed or {}).get("signedURL") or (signed or {}).get("signedUrl")
+  except Exception:
+    return None
+
+
+def _to_displayable_photo_urls(values: List[str]) -> List[str]:
   """
-  If photo_url already stores full URLs -> just return them.
-
-  If you later decide to store storage keys instead of URLs, you can:
-  - detect keys that don't start with http
-  - sign them using Supabase
+  Accepts:
+    - full URLs (http/https) => returned as-is
+    - storage keys (e.g. {uid}/gallery/1-xxx.bin) => returns signed URLs from bucket user-photos
   """
-  if not urls:
-    return []
-  return urls
+  out: List[str] = []
+  for v in values:
+    if not isinstance(v, str):
+      continue
+    s = v.strip()
+    if not s:
+      continue
+
+    if s.startswith("http://") or s.startswith("https://"):
+      out.append(s)
+      continue
+
+    # treat as storage key in bucket user-photos
+    url = _sign_storage_key(SUPABASE_PHOTOS_BUCKET, s)
+    if url:
+      out.append(url)
+
+  return out
 
 
 # ---------------------------
@@ -548,7 +580,7 @@ async def end_conversation(cid: str, user_id: uuid.UUID = Depends(get_current_us
 
 
 # ---------------------------
-# ✅ Photos + Feedback
+# Photos + Feedback
 # ---------------------------
 
 @router.get("/{cid}/match-feedback/status", response_model=MatchFeedbackStatusOut)
@@ -575,7 +607,7 @@ async def match_feedback_status(cid: str, user_id: uuid.UUID = Depends(get_curre
 
 @router.post("/{cid}/match-feedback", response_model=MatchFeedbackResultOut)
 async def submit_match_feedback(cid: str, body: MatchFeedbackIn, user_id: uuid.UUID = Depends(get_current_user_id)):
-  # ✅ validate UUID early (and bind as real UUID)
+  # validate UUID early
   try:
     cid_uuid = uuid.UUID(cid)
   except Exception:
@@ -629,14 +661,13 @@ async def conversation_photos(cid: str, user_id: uuid.UUID = Depends(get_current
 
     passed = _is_24h_passed(conv["created_at"])
     both = await _get_both_feedback(conn, cid, conv)
-
     both_yes = (both["a"] is True) and (both["b"] is True)
 
     if not (passed and both_yes):
       return []
 
     partner = _partner_id(conv, user_id)
-    urls = await _get_user_photo_urls(conn, partner)
+    keys_or_urls = await _get_user_photo_keys_or_urls(conn, partner)
 
-  # ✅ your table stores URLs already
-  return _signed_or_passthrough(urls)
+  # sign outside db tx
+  return _to_displayable_photo_urls(keys_or_urls)
