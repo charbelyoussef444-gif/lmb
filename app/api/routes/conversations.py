@@ -12,6 +12,7 @@ from app.db.engine import engine
 from app.deps.auth import get_current_user_id
 from app.realtime.manager import manager
 
+# ---- Supabase (signed URLs) ----
 from supabase import create_client  # type: ignore
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
@@ -27,7 +28,7 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 PHOTO_UNLOCK_HOURS = 24
 
-# ✅ Your actual Supabase table/column names
+# ✅ Your actual feedback table/col names
 MATCH_FEEDBACK_TABLE = "conversation_match_feedback"
 MATCH_FEEDBACK_TS_COL = "responded_at"
 
@@ -135,7 +136,6 @@ async def _get_my_feedback(conn, cid: str, me: uuid.UUID) -> Optional[bool]:
       {"cid": cid, "me": str(me)},
     )
   ).mappings().first()
-
   if not row:
     return None
   return bool(row["response"])
@@ -174,43 +174,39 @@ def _is_24h_passed(conv_created_at: datetime) -> bool:
   return (now - created) >= timedelta(hours=PHOTO_UNLOCK_HOURS)
 
 
-async def _get_user_photo_paths(conn, user_id: str) -> List[str]:
+async def _get_user_photo_urls(conn, user_id: str) -> List[str]:
+  """
+  ✅ Matches your schema:
+  public.user_photos(photo_url text not null, position integer null)
+  """
   rows = (
     await conn.execute(
       text(
         """
-        select storage_path
+        select photo_url
         from user_photos
         where user_id::text = :uid
-        order by created_at asc
+        order by coalesce(position, 999999) asc, created_at asc
         """
       ),
       {"uid": user_id},
     )
   ).scalars().all()
 
-  return [p for p in rows if isinstance(p, str) and p.strip()]
+  return [u for u in rows if isinstance(u, str) and u.strip()]
 
 
-def _signed_urls(paths: List[str]) -> List[str]:
-  if not paths:
+def _signed_or_passthrough(urls: List[str]) -> List[str]:
+  """
+  If photo_url already stores full URLs -> just return them.
+
+  If you later decide to store storage keys instead of URLs, you can:
+  - detect keys that don't start with http
+  - sign them using Supabase
+  """
+  if not urls:
     return []
-  if supabase is None:
-    return []
-
-  out: List[str] = []
-  bucket = supabase.storage.from_(SUPABASE_GALLERY_BUCKET)
-
-  for p in paths:
-    try:
-      signed = bucket.create_signed_url(p, SUPABASE_SIGN_SECONDS)
-      url = (signed or {}).get("signedURL") or (signed or {}).get("signedUrl")
-      if url:
-        out.append(url)
-    except Exception:
-      continue
-
-  return out
+  return urls
 
 
 # ---------------------------
@@ -552,7 +548,7 @@ async def end_conversation(cid: str, user_id: uuid.UUID = Depends(get_current_us
 
 
 # ---------------------------
-# ✅ Photos + Feedback (FIXED)
+# ✅ Photos + Feedback
 # ---------------------------
 
 @router.get("/{cid}/match-feedback/status", response_model=MatchFeedbackStatusOut)
@@ -579,7 +575,7 @@ async def match_feedback_status(cid: str, user_id: uuid.UUID = Depends(get_curre
 
 @router.post("/{cid}/match-feedback", response_model=MatchFeedbackResultOut)
 async def submit_match_feedback(cid: str, body: MatchFeedbackIn, user_id: uuid.UUID = Depends(get_current_user_id)):
-  # ✅ convert cid to UUID once; fail fast if frontend sends garbage
+  # ✅ validate UUID early (and bind as real UUID)
   try:
     cid_uuid = uuid.UUID(cid)
   except Exception:
@@ -590,7 +586,6 @@ async def submit_match_feedback(cid: str, body: MatchFeedbackIn, user_id: uuid.U
     if not _is_member(conv, user_id):
       raise HTTPException(403, "Not your conversation")
 
-    # ✅ NO SQL CASTS. Avoids the asyncpg ":" parsing issue completely.
     await conn.execute(
       text(
         f"""
@@ -641,6 +636,7 @@ async def conversation_photos(cid: str, user_id: uuid.UUID = Depends(get_current
       return []
 
     partner = _partner_id(conv, user_id)
-    paths = await _get_user_photo_paths(conn, partner)
+    urls = await _get_user_photo_urls(conn, partner)
 
-  return _signed_urls(paths)
+  # ✅ your table stores URLs already
+  return _signed_or_passthrough(urls)
