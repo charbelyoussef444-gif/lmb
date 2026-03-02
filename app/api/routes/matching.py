@@ -434,6 +434,9 @@ def _gender_match_ok(a_row, b_row) -> bool:
 
 
 async def _is_user_eligible_old_rules(conn, user_row) -> Tuple[bool, Optional[str]]:
+    """
+    Old rules APPLY ONLY to the REQUESTER (the person pressing Match).
+    """
     if not user_row:
         return False, "User not found"
 
@@ -470,6 +473,9 @@ async def _is_user_eligible_old_rules(conn, user_row) -> Tuple[bool, Optional[st
 
 
 async def _is_user_eligible_new_checks(conn, user_id: uuid.UUID) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+    """
+    New checks APPLY ONLY to the REQUESTER (the person pressing Match).
+    """
     checks = await _get_checks(conn, user_id)
 
     if not checks.get("exists"):
@@ -501,6 +507,10 @@ async def _is_user_eligible_new_checks(conn, user_id: uuid.UUID) -> Tuple[bool, 
 
 
 async def _fetch_candidate_pool(conn, a_user_id: str, a_lat: float, a_lng: float, a_max_km: float):
+    """
+    Candidate pool is NOT restricted by cooldown/active_chats anymore.
+    Only the REQUESTER is restricted by cooldown / max active chats.
+    """
     min_required_prefs = int(TRAIT_COUNT_EXPECTED * MIN_PREF_COVERAGE)
     me_uuid = uuid.UUID(a_user_id)
 
@@ -557,7 +567,6 @@ async def _fetch_candidate_pool(conn, a_user_id: str, a_lat: float, a_lng: float
                     where u.id <> :me
                       and u.location_id is not null
                       and u.verified = true
-                      and (u.active_chats < :max_chats)
                       and tc.trait_count >= :trait_expected
                       and pc.pref_count  >= :pref_required
                       and (u.banned is null or u.banned = false)
@@ -587,7 +596,6 @@ async def _fetch_candidate_pool(conn, a_user_id: str, a_lat: float, a_lng: float
             ),
             {
                 "me": me_uuid,
-                "max_chats": MAX_ACTIVE_CHATS,
                 "trait_expected": TRAIT_COUNT_EXPECTED,
                 "pref_required": min_required_prefs,
                 "a_lat": float(a_lat),
@@ -602,7 +610,19 @@ async def _fetch_candidate_pool(conn, a_user_id: str, a_lat: float, a_lng: float
     return rows
 
 
-async def _create_conversation_and_stamp(conn, a_id: str, b_id: str, match_score: float, match_distance_km: Optional[float]) -> str:
+async def _create_conversation_and_stamp(
+    conn,
+    a_id: str,
+    b_id: str,
+    match_score: float,
+    match_distance_km: Optional[float],
+) -> str:
+    """
+    IMPORTANT (one-way restriction):
+    - We still increment active_chats for BOTH users because they both gained a new conversation.
+    - We update last_match_date ONLY for the REQUESTER (user_a / initiator),
+      so candidates can be matched repeatedly without starting their own cooldown.
+    """
     new_cid_uuid = uuid.uuid4()
     a_uuid = uuid.UUID(a_id)
     b_uuid = uuid.UUID(b_id)
@@ -631,18 +651,20 @@ async def _create_conversation_and_stamp(conn, a_id: str, b_id: str, match_score
         },
     )
 
+    # ✅ cooldown applies only to the requester / initiator (A)
     await conn.execute(
         text(
             """
             update users
             set last_match_date = now(),
                 updated_at = now()
-            where id = :a or id = :b
+            where id = :a
             """
         ),
-        {"a": a_uuid, "b": b_uuid},
+        {"a": a_uuid},
     )
 
+    # ✅ both users gained a new active match chat
     await conn.execute(
         text(
             """
@@ -802,8 +824,8 @@ async def _insert_match_intro_messages(
     a_uuid = uuid.UUID(user_a_id)
     b_uuid = uuid.UUID(user_b_id)
 
-    # ✅ FIX: your DB trigger requires match messages to have BOTH participants
-    # So we insert match_intro as user->user messages (two rows, one per direction).
+    # ✅ your DB trigger requires match messages to have BOTH participants
+    # so we insert match_intro as user->user messages (two rows, one per direction).
     await conn.execute(
         text(
             """
@@ -897,6 +919,11 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
 
 @router.post("/generate", response_model=MatchResult)
 async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
+    """
+    One-way restriction behavior:
+    - The requester (current user) is blocked by cooldown + active chats.
+    - Candidates are NOT blocked by cooldown or active chats.
+    """
     convo_id: Optional[str] = None
     a_id: Optional[str] = None
     b_id: Optional[str] = None
@@ -907,12 +934,14 @@ async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
     b_name: str = "They"
 
     async with engine.begin() as conn:
+        # ✅ requester restrictions (new checks)
         ok_new, reason_new, _checks = await _is_user_eligible_new_checks(conn, user_id)
         if not ok_new:
             return MatchResultIneligible(status="ineligible", user_id=str(user_id), reason=reason_new or "not_eligible")
 
         a_row = await _fetch_user(conn, str(user_id))
 
+        # ✅ requester restrictions (old rules)
         ok_old, reason_old = await _is_user_eligible_old_rules(conn, a_row)
         if not ok_old:
             return MatchResultIneligible(status="ineligible", user_id=str(user_id), reason=reason_old or "not_eligible")
@@ -939,17 +968,12 @@ async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
         best_distance_km: Optional[float] = None
 
         for b_row in candidates:
+            # gender preference must still match both ways
             if not _gender_match_ok(a_row, b_row):
                 continue
 
-            b_ok_new, _, __ = await _is_user_eligible_new_checks(conn, uuid.UUID(b_row["id"]))
-            if not b_ok_new:
-                continue
-
-            b_ok_old, _ = await _is_user_eligible_old_rules(conn, b_row)
-            if not b_ok_old:
-                continue
-
+            # ✅ candidates are NOT blocked by cooldown or active chats
+            # We only keep: not already matched + scoring prerequisites (already enforced by SQL pool)
             if await _already_matched(conn, a_row["id"], b_row["id"]):
                 continue
 
