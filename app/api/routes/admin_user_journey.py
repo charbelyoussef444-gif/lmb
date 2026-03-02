@@ -5,14 +5,12 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import text, bindparam
-from sqlalchemy.dialects.postgresql import ARRAY, TEXT
+from sqlalchemy import text
 
 from app.db.engine import engine
 from app.deps.auth import get_current_user_id
 
 router = APIRouter(prefix="/admin/users", tags=["admin"])
-
 logger = logging.getLogger(__name__)
 
 FLAG_EVENTS = {
@@ -22,9 +20,6 @@ FLAG_EVENTS = {
     "message_sent",
     "subscription_active",
 }
-
-# Events that count as "active" (last_active = latest of these OR last sent message)
-ACTIVITY_EVENTS = sorted(set(FLAG_EVENTS))
 
 INACTIVITY_BAN_DAYS = 7
 
@@ -83,70 +78,40 @@ async def admin_user_summary(
         # RowMapping is immutable
         u = dict(u)
 
-        # last_active should reflect meaningful activity:
-        # - last relevant event (match_opened / message_sent / etc.)
-        # - OR last sent message (messages.sender_user_id)
-        # NOT last_login_at
+        # ✅ last_active should represent the user's own activity:
+        # use last_login_at (NOT updated_at, NOT event timestamps that others can trigger)
         last_active_stmt = text(
             f"""
-            with
-              last_event as (
-                select max(ts) as ts
-                from events
-                where user_id = :tid
-                  and event_name = ANY(:activity_events)
-              ),
-              last_msg as (
-                select max(created_at) as ts
-                from messages
-                where sender_user_id = :tid
-              ),
-              base as (
-                select
-                  u.id,
-                  u.admin,
-                  u.banned,
-                  u.created_at,
-                  greatest(
-                    coalesce((select ts from last_event), to_timestamp(0)),
-                    coalesce((select ts from last_msg), to_timestamp(0))
-                  ) as raw_last_active
-                from users u
-                where u.id = :tid
-              ),
-              computed as (
-                select
-                  id,
-                  admin,
-                  banned,
-                  case
-                    when raw_last_active = to_timestamp(0) then created_at
-                    else raw_last_active
-                  end as last_active_ts
-                from base
-              ),
-              ban as (
-                update users u
-                set banned = true
-                from computed c
-                where u.id = c.id
-                  and c.admin is not true
-                  and u.banned is not true
-                  and c.last_active_ts is not null
-                  and (now() - c.last_active_ts) >= interval '{INACTIVITY_BAN_DAYS} days'
-                returning u.id
-              )
+            with computed as (
+              select
+                id,
+                admin,
+                banned,
+                created_at,
+                coalesce(last_login_at, created_at) as last_active_ts
+              from users
+              where id = :tid
+            ),
+            ban as (
+              update users u
+              set banned = true
+              from computed c
+              where u.id = c.id
+                and c.admin is not true
+                and u.banned is not true
+                and c.last_active_ts is not null
+                and (now() - c.last_active_ts) >= interval '{INACTIVITY_BAN_DAYS} days'
+              returning u.id
+            )
             select last_active_ts as last_active
             from computed
             """
-        ).bindparams(
-            bindparam("activity_events", type_=ARRAY(TEXT))
         )
 
         last_active_row = (
             await conn.execute(
                 last_active_stmt,
-                {"tid": str(target_user_id), "activity_events": ACTIVITY_EVENTS},
+                {"tid": str(target_user_id)},
             )
         ).mappings().first()
 
