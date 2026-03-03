@@ -6,7 +6,8 @@ from typing import List, Optional, Literal
 
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
+from sqlalchemy.dialects.postgresql import ARRAY, TEXT as PG_TEXT
 
 from app.db.engine import engine
 from app.deps.auth import get_current_user_id
@@ -18,7 +19,7 @@ from supabase import create_client  # type: ignore
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
-# ✅ your bucket (from screenshot)
+# ✅ your bucket
 SUPABASE_PHOTOS_BUCKET = os.getenv("SUPABASE_PHOTOS_BUCKET", "user-photos").strip() or "user-photos"
 SUPABASE_SIGN_SECONDS = int(os.getenv("SUPABASE_SIGN_SECONDS", "3600"))
 
@@ -30,9 +31,19 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 PHOTO_UNLOCK_HOURS = 24
 
-# ✅ your feedback table/col names (from screenshot earlier)
+# ✅ your feedback table/col names
 MATCH_FEEDBACK_TABLE = "conversation_match_feedback"
 MATCH_FEEDBACK_TS_COL = "responded_at"
+
+# ✅ Only events that mean "the user did something"
+# This matches your admin_user_journey.py logic.
+ACTIVITY_EVENTS = [
+  "signup_completed",
+  "assessment_started",
+  "assessment_completed",
+  "match_opened",
+  "message_sent",
+]
 
 
 # ---------------------------
@@ -43,7 +54,7 @@ class ConversationOut(BaseModel):
   id: str
   partnerName: str
   partnerAge: Optional[int] = None
-  partnerCity: Optional[str] = None
+  partnerCity: Optional[int] = None  # kept as in your original typing? (if location is text, change to Optional[str])
   lastMessage: Optional[str] = None
   lastAt: Optional[str] = None
   compatibility: Optional[float] = None
@@ -183,7 +194,6 @@ async def _get_user_photo_keys_or_urls(conn, user_id: str) -> List[str]:
 
   In your case, photo_url is behaving like a STORAGE KEY such as:
     {user_id}/gallery/1-xxxx.bin
-  (from your Supabase bucket screenshot)
 
   If later you store full https:// URLs, this code still works.
   """
@@ -247,6 +257,10 @@ def _to_displayable_photo_urls(values: List[str]) -> List[str]:
 
 @router.get("", response_model=List[ConversationOut])
 async def list_conversations(user_id: uuid.UUID = Depends(get_current_user_id)):
+  # ✅ partnerLastActive now matches your admin logic:
+  # - last_login_at
+  # - last ACTIVITY event timestamp
+  # - last message SENT by partner (not received), excluding match_intro
   q = text(
     """
     with my_convos as (
@@ -294,12 +308,17 @@ async def list_conversations(user_id: uuid.UUID = Depends(get_current_user_id)):
 
       greatest(
         coalesce(u.last_login_at, to_timestamp(0)),
-        coalesce((select max(ts) from events e where e.user_id = mc.partner_id), to_timestamp(0)),
+        coalesce((
+          select max(e.ts)
+          from events e
+          where e.user_id = mc.partner_id
+            and e.event_name = any(:activity_events)
+        ), to_timestamp(0)),
         coalesce((
           select max(m2.created_at)
           from messages m2
           where m2.sender_user_id = mc.partner_id
-             or m2.receiver_user_id = mc.partner_id
+            and m2.message_type <> 'match_intro'
         ), to_timestamp(0))
       ) as partner_last_active_ts
 
@@ -309,10 +328,17 @@ async def list_conversations(user_id: uuid.UUID = Depends(get_current_user_id)):
     left join unread un on un.conversation_id = mc.id
     order by coalesce(lm.created_at, 'epoch') desc;
     """
+  ).bindparams(
+    bindparam("activity_events", type_=ARRAY(PG_TEXT))
   )
 
   async with engine.begin() as conn:
-    rows = (await conn.execute(q, {"me": str(user_id)})).mappings().all()
+    rows = (
+      await conn.execute(
+        q,
+        {"me": str(user_id), "activity_events": ACTIVITY_EVENTS},
+      )
+    ).mappings().all()
 
   out: List[ConversationOut] = []
   for r in rows:
