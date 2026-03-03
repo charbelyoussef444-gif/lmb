@@ -5,7 +5,8 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
+from sqlalchemy.dialects.postgresql import ARRAY, TEXT
 
 from app.db.engine import engine
 from app.deps.auth import get_current_user_id
@@ -20,6 +21,16 @@ FLAG_EVENTS = {
     "message_sent",
     "subscription_active",
 }
+
+# ✅ Only events that mean "the user did something"
+# (prevents "someone matched with him" from counting as his activity if you log those to his user_id)
+ACTIVITY_EVENTS = [
+    "signup_completed",
+    "assessment_started",
+    "assessment_completed",
+    "match_opened",
+    "message_sent",
+]
 
 INACTIVITY_BAN_DAYS = 7
 
@@ -75,12 +86,46 @@ async def admin_user_summary(
         if not u:
             raise HTTPException(404, "User not found")
 
-        # RowMapping is immutable
         u = dict(u)
 
-        # ✅ last_active should represent the user's own activity:
-        # use last_login_at (NOT updated_at, NOT event timestamps that others can trigger)
-        last_active_stmt = text(
+        # ✅ Latest user-driven event (this is what you want to show)
+        latest_activity_stmt = text(
+            """
+            select event_name, ts
+            from events
+            where user_id = :tid
+              and event_name = any(:activity_events)
+            order by ts desc
+            limit 1
+            """
+        ).bindparams(
+            bindparam("activity_events", type_=ARRAY(TEXT))
+        )
+
+        latest_activity_row = (
+            await conn.execute(
+                latest_activity_stmt,
+                {"tid": str(target_user_id), "activity_events": ACTIVITY_EVENTS},
+            )
+        ).mappings().first()
+
+        # We'll keep the existing "last_active" field for your UI,
+        # but now it means: last user-driven event timestamp.
+        last_active = None
+        last_active_event = None
+
+        if latest_activity_row and latest_activity_row.get("ts") is not None:
+            last_active = latest_activity_row["ts"].isoformat()
+            last_active_event = latest_activity_row.get("event_name")
+
+        # If user never had any activity event, fall back to created_at
+        if last_active is None and u.get("created_at") is not None:
+            last_active = u["created_at"].isoformat()
+            last_active_event = "created_at_fallback"
+
+        # ✅ Optional: keep your inactivity auto-ban, but base it on last user-driven event
+        # (fallback to created_at)
+        ban_stmt = text(
             f"""
             with computed as (
               select
@@ -88,36 +133,36 @@ async def admin_user_summary(
                 admin,
                 banned,
                 created_at,
-                coalesce(last_login_at, created_at) as last_active_ts
+                coalesce(
+                  (
+                    select max(ts)
+                    from events
+                    where user_id = :tid
+                      and event_name = any(:activity_events)
+                  ),
+                  created_at
+                ) as last_active_ts
               from users
               where id = :tid
-            ),
-            ban as (
-              update users u
-              set banned = true
-              from computed c
-              where u.id = c.id
-                and c.admin is not true
-                and u.banned is not true
-                and c.last_active_ts is not null
-                and (now() - c.last_active_ts) >= interval '{INACTIVITY_BAN_DAYS} days'
-              returning u.id
             )
-            select last_active_ts as last_active
-            from computed
+            update users u
+            set banned = true
+            from computed c
+            where u.id = c.id
+              and c.admin is not true
+              and u.banned is not true
+              and c.last_active_ts is not null
+              and (now() - c.last_active_ts) >= interval '{INACTIVITY_BAN_DAYS} days'
+            returning u.id
             """
+        ).bindparams(
+            bindparam("activity_events", type_=ARRAY(TEXT))
         )
 
-        last_active_row = (
-            await conn.execute(
-                last_active_stmt,
-                {"tid": str(target_user_id)},
-            )
-        ).mappings().first()
-
-        last_active = None
-        if last_active_row and last_active_row.get("last_active") is not None:
-            last_active = last_active_row["last_active"].isoformat()
+        await conn.execute(
+            ban_stmt,
+            {"tid": str(target_user_id), "activity_events": ACTIVITY_EVENTS},
+        )
 
         # refresh banned (may have changed)
         banned_row = (
@@ -192,7 +237,10 @@ async def admin_user_summary(
             "banned": u.get("banned"),
             "admin": u.get("admin"),
             "created_at": u["created_at"].isoformat() if u.get("created_at") else None,
+            # ✅ This is now "latest user-driven event time"
             "last_active": last_active,
+            # ✅ Helpful to display/debug what counted as last_active
+            "last_active_event": last_active_event,
             "gender": u.get("gender"),
             "age": u.get("age"),
             "location": u.get("location"),
