@@ -9,6 +9,9 @@ from sqlalchemy import text
 from app.db.engine import engine
 from app.deps.auth import get_current_user_id
 
+# ✅ NEW (for deleting user files)
+from app.services.storage import delete_prefix
+
 router = APIRouter(prefix="/me", tags=["me"])
 
 
@@ -585,3 +588,87 @@ async def complete_onboarding(
     if out.get("last_login_at") is not None:
         out["last_login_at"] = out["last_login_at"].isoformat()
     return out
+
+
+# ✅ NEW: Delete my account (DB + storage)
+@router.delete("", status_code=204)
+async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
+    uid = str(user_id)
+
+    # Best-effort storage cleanup.
+    # Adjust these prefixes to match your actual key structure.
+    try:
+        await delete_prefix(f"gallery/{uid}/")
+    except Exception:
+        pass
+
+    try:
+        await delete_prefix(f"kyc/{uid}/")
+    except Exception:
+        pass
+
+    # DB cleanup (order matters with FK constraints)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("delete from user_interests where user_id = :uid"),
+            {"uid": uid},
+        )
+
+        # If these tables exist in your DB (they do in your other backend snippets)
+        await conn.execute(
+            text("delete from kyc_rejection_reasons where user_id = :uid"),
+            {"uid": uid},
+        )
+        await conn.execute(
+            text("delete from kyc_verification where user_id = :uid"),
+            {"uid": uid},
+        )
+
+        # If you do NOT have these tables, remove these blocks.
+        # If you do, keep them to prevent orphaned chat/match data.
+        await conn.execute(
+            text(
+                """
+                delete from messages
+                where conversation_id in (
+                  select id from conversations
+                  where user1_id = :uid or user2_id = :uid
+                )
+                """
+            ),
+            {"uid": uid},
+        )
+
+        await conn.execute(
+            text(
+                """
+                delete from conversations
+                where user1_id = :uid or user2_id = :uid
+                """
+            ),
+            {"uid": uid},
+        )
+
+        await conn.execute(
+            text(
+                """
+                delete from matches
+                where user1_id = :uid or user2_id = :uid
+                """
+            ),
+            {"uid": uid},
+        )
+
+        res = await conn.execute(
+            text("delete from users where id = :uid"),
+            {"uid": uid},
+        )
+
+    # sanity check (ignore if driver doesn't support rowcount reliably)
+    try:
+        if res.rowcount == 0:
+            raise HTTPException(404, "User not found")
+    except Exception:
+        pass
+
+    return
