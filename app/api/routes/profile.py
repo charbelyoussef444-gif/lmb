@@ -2,9 +2,10 @@
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Body, HTTPException, Depends, Query
+from fastapi import APIRouter, Body, HTTPException, Depends, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.engine import engine
 from app.deps.auth import get_current_user_id
@@ -121,16 +122,48 @@ def _validate_location_id(location_id: Optional[int]) -> None:
 
 async def _try_exec(conn, sql: str, params: dict) -> None:
     """
-    Best-effort delete helper:
-    - prevents 500s when a table/column doesn't exist across environments
-    - keeps the account deletion endpoint resilient
+    Best-effort delete helper that DOES NOT poison the outer transaction.
+    Uses a SAVEPOINT (nested transaction). If it fails, we rollback only that statement.
     """
     try:
-        await conn.execute(text(sql), params)
-    except Exception:
-        # Intentionally swallow to avoid 500 during delete-me.
-        # You can add logging here if you want.
+        async with conn.begin_nested():  # ✅ SAVEPOINT so failures don't abort the main txn
+            await conn.execute(text(sql), params)
+    except SQLAlchemyError:
+        # Intentionally swallow to avoid 500 during delete-me across schema variations.
+        # (Add logging if you want.)
         pass
+
+
+def _row_to_profile_out(row) -> dict:
+    out = dict(row)
+    if out.get("last_login_at") is not None:
+        out["last_login_at"] = out["last_login_at"].isoformat()
+    return out
+
+
+_PROFILE_SELECT_SQL = """
+select u.id::text,
+       u.full_name,
+       u.gender,
+       u.age,
+       u.location_id,
+       case
+         when l.id is null then null
+         else concat_ws(', ', l.city, l.admin_name, l.country)
+       end as location_label,
+       u.personality_weight,
+       u.interests_weight,
+       u.verified,
+       u.admin,
+       u.preferred_min_age,
+       u.preferred_max_age,
+       u.gender_pref as preferred_gender,
+       u.preferred_max_distance_km,
+       u.last_login_at
+from users u
+left join locations l on l.id = u.location_id
+where u.id = :uid
+"""
 
 
 # ---------- Routes ----------
@@ -189,8 +222,7 @@ async def list_cities(country: str = Query(..., min_length=1, max_length=128)):
                     where country = :c
                     order by population desc nulls last, city asc
                     """
-                )
-            ,
+                ),
                 {"c": country},
             )
         ).mappings().all()
@@ -200,36 +232,7 @@ async def list_cities(country: str = Query(..., min_length=1, max_length=128)):
 @router.get("", response_model=ProfileOut)
 async def get_me(user_id: uuid.UUID = Depends(get_current_user_id)):
     async with engine.begin() as conn:
-        row = (
-            await conn.execute(
-                text(
-                    """
-                    select u.id::text,
-                           u.full_name,
-                           u.gender,
-                           u.age,
-                           u.location_id,
-                           case
-                             when l.id is null then null
-                             else concat_ws(', ', l.city, l.admin_name, l.country)
-                           end as location_label,
-                           u.personality_weight,
-                           u.interests_weight,
-                           u.verified,
-                           u.admin,
-                           u.preferred_min_age,
-                           u.preferred_max_age,
-                           u.gender_pref as preferred_gender,
-                           u.preferred_max_distance_km,
-                           u.last_login_at
-                    from users u
-                    left join locations l on l.id = u.location_id
-                    where u.id = :uid
-                    """
-                ),
-                {"uid": str(user_id)},
-            )
-        ).mappings().first()
+        row = (await conn.execute(text(_PROFILE_SELECT_SQL), {"uid": str(user_id)})).mappings().first()
 
         if not row:
             row = (
@@ -267,11 +270,7 @@ async def get_me(user_id: uuid.UUID = Depends(get_current_user_id)):
                 )
             ).mappings().first()
 
-    out = dict(row)
-    if out.get("last_login_at") is not None:
-        out["last_login_at"] = out["last_login_at"].isoformat()
-
-    return out
+    return _row_to_profile_out(row)
 
 
 @router.get("/interests", response_model=List[InterestOut])
@@ -317,6 +316,7 @@ async def put_my_interests(
     user_id: uuid.UUID = Depends(get_current_user_id),
 ):
     names = [i.name.strip() for i in items if i.name.strip()]
+
     async with engine.begin() as conn:
         ids: List[int] = []
         for name in names:
@@ -359,12 +359,14 @@ async def put_my_interests(
                 {"uid": str(user_id)},
             )
         ).mappings().all()
+
     return rows
 
 
 @router.put("/weights", response_model=ProfileOut)
 async def update_weights(
-    body: WeightsIn, user_id: uuid.UUID = Depends(get_current_user_id)
+    body: WeightsIn,
+    user_id: uuid.UUID = Depends(get_current_user_id),
 ):
     if abs((body.personality_weight + body.interests_weight) - 1.0) > 0.01:
         raise HTTPException(400, "weights must sum to ≈ 1.0")
@@ -407,42 +409,9 @@ async def update_weights(
         if not row:
             raise HTTPException(404, "User not found")
 
-    async with engine.begin() as conn:
-        row2 = (
-            await conn.execute(
-                text(
-                    """
-                    select u.id::text,
-                           u.full_name,
-                           u.gender,
-                           u.age,
-                           u.location_id,
-                           case
-                             when l.id is null then null
-                             else concat_ws(', ', l.city, l.admin_name, l.country)
-                           end as location_label,
-                           u.personality_weight,
-                           u.interests_weight,
-                           u.verified,
-                           u.admin,
-                           u.preferred_min_age,
-                           u.preferred_max_age,
-                           u.gender_pref as preferred_gender,
-                           u.preferred_max_distance_km,
-                           u.last_login_at
-                    from users u
-                    left join locations l on l.id = u.location_id
-                    where u.id = :uid
-                    """
-                ),
-                {"uid": str(user_id)},
-            )
-        ).mappings().first()
+        row2 = (await conn.execute(text(_PROFILE_SELECT_SQL), {"uid": str(user_id)})).mappings().first()
 
-    out = dict(row2)
-    if out.get("last_login_at") is not None:
-        out["last_login_at"] = out["last_login_at"].isoformat()
-    return out
+    return _row_to_profile_out(row2)
 
 
 @router.put("/preferences", response_model=ProfileOut)
@@ -476,44 +445,11 @@ async def update_match_preferences(
             },
         )
 
-        row = (
-            await conn.execute(
-                text(
-                    """
-                    select u.id::text,
-                           u.full_name,
-                           u.gender,
-                           u.age,
-                           u.location_id,
-                           case
-                             when l.id is null then null
-                             else concat_ws(', ', l.city, l.admin_name, l.country)
-                           end as location_label,
-                           u.personality_weight,
-                           u.interests_weight,
-                           u.verified,
-                           u.admin,
-                           u.preferred_min_age,
-                           u.preferred_max_age,
-                           u.gender_pref as preferred_gender,
-                           u.preferred_max_distance_km,
-                           u.last_login_at
-                    from users u
-                    left join locations l on l.id = u.location_id
-                    where u.id = :uid
-                    """
-                ),
-                {"uid": str(user_id)},
-            )
-        ).mappings().first()
-
+        row = (await conn.execute(text(_PROFILE_SELECT_SQL), {"uid": str(user_id)})).mappings().first()
         if not row:
             raise HTTPException(404, "User not found")
 
-    out = dict(row)
-    if out.get("last_login_at") is not None:
-        out["last_login_at"] = out["last_login_at"].isoformat()
-    return out
+    return _row_to_profile_out(row)
 
 
 @router.put("/onboarding", response_model=ProfileOut)
@@ -565,44 +501,11 @@ async def complete_onboarding(
             },
         )
 
-        row = (
-            await conn.execute(
-                text(
-                    """
-                    select u.id::text,
-                           u.full_name,
-                           u.gender,
-                           u.age,
-                           u.location_id,
-                           case
-                             when l.id is null then null
-                             else concat_ws(', ', l.city, l.admin_name, l.country)
-                           end as location_label,
-                           u.personality_weight,
-                           u.interests_weight,
-                           u.verified,
-                           u.admin,
-                           u.preferred_min_age,
-                           u.preferred_max_age,
-                           u.gender_pref as preferred_gender,
-                           u.preferred_max_distance_km,
-                           u.last_login_at
-                    from users u
-                    left join locations l on l.id = u.location_id
-                    where u.id = :uid
-                    """
-                ),
-                {"uid": str(user_id)},
-            )
-        ).mappings().first()
-
+        row = (await conn.execute(text(_PROFILE_SELECT_SQL), {"uid": str(user_id)})).mappings().first()
         if not row:
             raise HTTPException(404, "User not found")
 
-    out = dict(row)
-    if out.get("last_login_at") is not None:
-        out["last_login_at"] = out["last_login_at"].isoformat()
-    return out
+    return _row_to_profile_out(row)
 
 
 # ✅ Delete my account (DB + storage)
@@ -610,7 +513,7 @@ async def complete_onboarding(
 async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
     uid = str(user_id)
 
-    # Best-effort storage cleanup.
+    # Best-effort storage cleanup (outside DB txn)
     for prefix in (f"gallery/{uid}/", f"kyc/{uid}/"):
         try:
             await delete_prefix(prefix)
@@ -618,12 +521,12 @@ async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
             pass
 
     async with engine.begin() as conn:
-        # User-linked tables (safe)
+        # User-linked tables (safe, and won't abort txn thanks to savepoints)
         await _try_exec(conn, "delete from user_interests where user_id = :uid", {"uid": uid})
         await _try_exec(conn, "delete from kyc_rejection_reasons where user_id = :uid", {"uid": uid})
         await _try_exec(conn, "delete from kyc_verification where user_id = :uid", {"uid": uid})
 
-        # Messages tied to user's conversations (FIXED: user_a_id/user_b_id)
+        # Messages tied to user's conversations
         await _try_exec(
             conn,
             """
@@ -636,38 +539,26 @@ async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
             {"uid": uid},
         )
 
-        # Conversations (optional, because FK to users is ON DELETE CASCADE, but safe to do explicitly)
+        # Conversations (optional if FK has ON DELETE CASCADE, but fine)
         await _try_exec(
             conn,
-            """
-            delete from conversations
-            where user_a_id = :uid or user_b_id = :uid
-            """,
+            "delete from conversations where user_a_id = :uid or user_b_id = :uid",
             {"uid": uid},
         )
 
-        # Matches: schema may vary between environments. Try both common conventions.
+        # Matches: schema may vary. Try both common conventions.
         await _try_exec(
             conn,
-            """
-            delete from matches
-            where user_a_id = :uid or user_b_id = :uid
-            """,
+            "delete from matches where user_a_id = :uid or user_b_id = :uid",
             {"uid": uid},
         )
         await _try_exec(
             conn,
-            """
-            delete from matches
-            where user1_id = :uid or user2_id = :uid
-            """,
+            "delete from matches where user1_id = :uid or user2_id = :uid",
             {"uid": uid},
         )
 
-        res = await conn.execute(
-            text("delete from users where id = :uid"),
-            {"uid": uid},
-        )
+        res = await conn.execute(text("delete from users where id = :uid"), {"uid": uid})
 
     # sanity check (driver may not always provide rowcount reliably)
     try:
@@ -676,4 +567,4 @@ async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
     except Exception:
         pass
 
-    return None
+    return Response(status_code=204)
