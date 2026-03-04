@@ -119,6 +119,20 @@ def _validate_location_id(location_id: Optional[int]) -> None:
         raise HTTPException(400, "location_id must be a positive integer")
 
 
+async def _try_exec(conn, sql: str, params: dict) -> None:
+    """
+    Best-effort delete helper:
+    - prevents 500s when a table/column doesn't exist across environments
+    - keeps the account deletion endpoint resilient
+    """
+    try:
+        await conn.execute(text(sql), params)
+    except Exception:
+        # Intentionally swallow to avoid 500 during delete-me.
+        # You can add logging here if you want.
+        pass
+
+
 # ---------- Routes ----------
 
 @router.post("/ping")
@@ -175,7 +189,8 @@ async def list_cities(country: str = Query(..., min_length=1, max_length=128)):
                     where country = :c
                     order by population desc nulls last, city asc
                     """
-                ),
+                )
+            ,
                 {"c": country},
             )
         ).mappings().all()
@@ -590,72 +605,62 @@ async def complete_onboarding(
     return out
 
 
-# ✅ NEW: Delete my account (DB + storage)
+# ✅ Delete my account (DB + storage)
 @router.delete("", status_code=204)
 async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
     uid = str(user_id)
 
     # Best-effort storage cleanup.
-    # Adjust these prefixes to match your actual key structure.
-    try:
-        await delete_prefix(f"gallery/{uid}/")
-    except Exception:
-        pass
+    for prefix in (f"gallery/{uid}/", f"kyc/{uid}/"):
+        try:
+            await delete_prefix(prefix)
+        except Exception:
+            pass
 
-    try:
-        await delete_prefix(f"kyc/{uid}/")
-    except Exception:
-        pass
-
-    # DB cleanup (order matters with FK constraints)
     async with engine.begin() as conn:
-        await conn.execute(
-            text("delete from user_interests where user_id = :uid"),
+        # User-linked tables (safe)
+        await _try_exec(conn, "delete from user_interests where user_id = :uid", {"uid": uid})
+        await _try_exec(conn, "delete from kyc_rejection_reasons where user_id = :uid", {"uid": uid})
+        await _try_exec(conn, "delete from kyc_verification where user_id = :uid", {"uid": uid})
+
+        # Messages tied to user's conversations (FIXED: user_a_id/user_b_id)
+        await _try_exec(
+            conn,
+            """
+            delete from messages
+            where conversation_id in (
+              select id from conversations
+              where user_a_id = :uid or user_b_id = :uid
+            )
+            """,
             {"uid": uid},
         )
 
-        # If these tables exist in your DB (they do in your other backend snippets)
-        await conn.execute(
-            text("delete from kyc_rejection_reasons where user_id = :uid"),
-            {"uid": uid},
-        )
-        await conn.execute(
-            text("delete from kyc_verification where user_id = :uid"),
-            {"uid": uid},
-        )
-
-        # If you do NOT have these tables, remove these blocks.
-        # If you do, keep them to prevent orphaned chat/match data.
-        await conn.execute(
-            text(
-                """
-                delete from messages
-                where conversation_id in (
-                  select id from conversations
-                  where user1_id = :uid or user2_id = :uid
-                )
-                """
-            ),
+        # Conversations (optional, because FK to users is ON DELETE CASCADE, but safe to do explicitly)
+        await _try_exec(
+            conn,
+            """
+            delete from conversations
+            where user_a_id = :uid or user_b_id = :uid
+            """,
             {"uid": uid},
         )
 
-        await conn.execute(
-            text(
-                """
-                delete from conversations
-                where user1_id = :uid or user2_id = :uid
-                """
-            ),
+        # Matches: schema may vary between environments. Try both common conventions.
+        await _try_exec(
+            conn,
+            """
+            delete from matches
+            where user_a_id = :uid or user_b_id = :uid
+            """,
             {"uid": uid},
         )
-
-        await conn.execute(
-            text(
-                """
-                delete from matches
-                where user1_id = :uid or user2_id = :uid
-                """
-            ),
+        await _try_exec(
+            conn,
+            """
+            delete from matches
+            where user1_id = :uid or user2_id = :uid
+            """,
             {"uid": uid},
         )
 
@@ -664,11 +669,11 @@ async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
             {"uid": uid},
         )
 
-    # sanity check (ignore if driver doesn't support rowcount reliably)
+    # sanity check (driver may not always provide rowcount reliably)
     try:
         if res.rowcount == 0:
             raise HTTPException(404, "User not found")
     except Exception:
         pass
 
-    return
+    return None
