@@ -1,20 +1,22 @@
 # app/api/routes/profile.py
 import uuid
+import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Depends, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from app.db.engine import engine
 from app.deps.auth import get_current_user_id
 
-# ✅ NEW (for deleting user files)
+# ✅ storage cleanup (best-effort)
 from app.services.storage import delete_prefix
 
 router = APIRouter(prefix="/me", tags=["me"])
 
+logger = logging.getLogger("me_routes")
 
 # ---------- Models ----------
 
@@ -48,7 +50,7 @@ class ProfileOut(BaseModel):
 class OnboardingIn(BaseModel):
     age: int = Field(..., ge=18, le=99)
 
-    # UPDATED: store selected city id
+    # store selected city id
     location_id: Optional[int] = None
 
     gender: Optional[str] = None
@@ -56,7 +58,6 @@ class OnboardingIn(BaseModel):
     preferred_max_age: Optional[int] = None
     preferred_gender: Optional[str] = None
 
-    # NEW
     preferred_max_distance_km: Optional[int] = None
 
 
@@ -79,8 +80,6 @@ class MatchPreferencesIn(BaseModel):
     preferred_min_age: Optional[int] = None
     preferred_max_age: Optional[int] = None
     preferred_gender: Optional[str] = None  # "women" | "men" | "everyone"
-
-    # NEW
     preferred_max_distance_km: Optional[int] = None
 
 
@@ -118,20 +117,6 @@ def _validate_location_id(location_id: Optional[int]) -> None:
         return
     if location_id <= 0:
         raise HTTPException(400, "location_id must be a positive integer")
-
-
-async def _try_exec(conn, sql: str, params: dict) -> None:
-    """
-    Best-effort delete helper that DOES NOT poison the outer transaction.
-    Uses a SAVEPOINT (nested transaction). If it fails, we rollback only that statement.
-    """
-    try:
-        async with conn.begin_nested():  # ✅ SAVEPOINT so failures don't abort the main txn
-            await conn.execute(text(sql), params)
-    except SQLAlchemyError:
-        # Intentionally swallow to avoid 500 during delete-me across schema variations.
-        # (Add logging if you want.)
-        pass
 
 
 def _row_to_profile_out(row) -> dict:
@@ -222,8 +207,9 @@ async def list_cities(country: str = Query(..., min_length=1, max_length=128)):
                     where country = :c
                     order by population desc nulls last, city asc
                     """
-                ),
-                {"c": country},
+                )
+            ,
+            {"c": country},
             )
         ).mappings().all()
     return rows
@@ -508,59 +494,33 @@ async def complete_onboarding(
     return _row_to_profile_out(row)
 
 
-# ✅ Delete my account (DB + storage)
+# ✅ Delete my account (match Supabase behavior: delete the users row; DB cascades handle the rest)
 @router.delete("", status_code=204)
 async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
     uid = str(user_id)
+    logger.info("delete_me uid=%s", uid)
 
     # Best-effort storage cleanup (outside DB txn)
     for prefix in (f"gallery/{uid}/", f"kyc/{uid}/"):
         try:
             await delete_prefix(prefix)
         except Exception:
-            pass
+            logger.exception("Storage cleanup failed for prefix=%s", prefix)
 
-    async with engine.begin() as conn:
-        # User-linked tables (safe, and won't abort txn thanks to savepoints)
-        await _try_exec(conn, "delete from user_interests where user_id = :uid", {"uid": uid})
-        await _try_exec(conn, "delete from kyc_rejection_reasons where user_id = :uid", {"uid": uid})
-        await _try_exec(conn, "delete from kyc_verification where user_id = :uid", {"uid": uid})
-
-        # Messages tied to user's conversations
-        await _try_exec(
-            conn,
-            """
-            delete from messages
-            where conversation_id in (
-              select id from conversations
-              where user_a_id = :uid or user_b_id = :uid
+    try:
+        async with engine.begin() as conn:
+            res = await conn.execute(
+                text("delete from public.users where id = :uid"),
+                {"uid": uid},
             )
-            """,
-            {"uid": uid},
-        )
+    except IntegrityError:
+        # If you hit this, then a FK is RESTRICT (Supabase delete would fail too)
+        raise HTTPException(409, "Cannot delete user due to dependent rows (FK restrict)")
+    except SQLAlchemyError:
+        logger.exception("DB error during delete user uid=%s", uid)
+        raise HTTPException(500, "DB error while deleting account")
 
-        # Conversations (optional if FK has ON DELETE CASCADE, but fine)
-        await _try_exec(
-            conn,
-            "delete from conversations where user_a_id = :uid or user_b_id = :uid",
-            {"uid": uid},
-        )
-
-        # Matches: schema may vary. Try both common conventions.
-        await _try_exec(
-            conn,
-            "delete from matches where user_a_id = :uid or user_b_id = :uid",
-            {"uid": uid},
-        )
-        await _try_exec(
-            conn,
-            "delete from matches where user1_id = :uid or user2_id = :uid",
-            {"uid": uid},
-        )
-
-        res = await conn.execute(text("delete from users where id = :uid"), {"uid": uid})
-
-    # sanity check (driver may not always provide rowcount reliably)
+    # sanity check
     try:
         if res.rowcount == 0:
             raise HTTPException(404, "User not found")
