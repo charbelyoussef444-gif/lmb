@@ -32,99 +32,96 @@ TRAIT_LABELS = {
 TRAIT_ID_BY_LABEL = {v.lower(): k for k, v in TRAIT_LABELS.items()}
 
 # Engineered to cover ALL traits with minimal questions
-# Added:
-# - S6 to cover trait 10 (exclusivity) in self phase
-# - P6 to cover trait 5 (openness) in preference phase
 PHASE1_ORDER = ["S1", "S2", "S3", "S4", "S5", "S6"]
 PHASE2_ORDER = ["P1", "P2", "P3", "P4", "P5", "P6"]
 
 PHASE1_QUESTIONS = {
     "S1": {
-        "text": "When I’m really into someone, I usually…",
-        "A": "Want frequent contact and reassurance",
-        "B": "Like steady contact but not too intense",
-        "C": "Need lots of space, hate constant messaging",
-        "D": "Other (one sentence)",
+        "text": "When I start liking someone, my natural rhythm of contact tends to be…",
+        "A": "Frequent messages and check-ins feel natural to me",
+        "B": "Regular contact, but with space for both people’s routines",
+        "C": "I enjoy the connection, but I like plenty of personal space between conversations",
+        "D": "Write your own answer",
     },
     "S2": {
-        "text": "In a conflict, I usually…",
-        "A": "Talk it out immediately",
-        "B": "Cool off, then talk",
-        "C": "Avoid it / shut down",
-        "D": "Other (one sentence)",
+        "text": "When tension comes up between me and someone I care about, I usually…",
+        "A": "Prefer addressing it fairly soon so we can clear the air",
+        "B": "Take a little time to think, then come back to talk it through",
+        "C": "Give the situation space and let things settle naturally",
+        "D": "Write your own answer",
     },
     "S3": {
-        "text": "Plans with me are usually…",
-        "A": "Locked in. If I commit, I show up.",
-        "B": "Flexible, but I try to be reliable.",
-        "C": "Spontaneous / last-minute, I hate rigid plans.",
-        "D": "Other (one sentence)",
+        "text": "When making plans with me, people usually notice that I…",
+        "A": "Like confirming plans clearly ahead of time",
+        "B": "Am dependable, but I prefer keeping things somewhat flexible",
+        "C": "Enjoy plans that evolve naturally in the moment",
+        "D": "Write your own answer",
     },
     "S4": {
-        "text": "When something bothers me, I…",
-        "A": "Say it directly and clearly",
-        "B": "Hint / soften it, avoid being harsh",
-        "C": "Keep it in, deal with it alone",
-        "D": "Other (one sentence)",
+        "text": "If something someone does bothers me, my instinct is to…",
+        "A": "Explain it clearly so we both understand each other",
+        "B": "Bring it up gently so it doesn’t feel confrontational",
+        "C": "Reflect on it privately before deciding whether to mention it",
+        "D": "Write your own answer",
     },
     "S5": {
-        "text": "My vibe with new experiences is…",
-        "A": "Give me novelty—art, culture, travel, weird ideas",
-        "B": "Some novelty is fun, but I like balance",
-        "C": "I prefer familiar routines and predictable environments",
-        "D": "Other (one sentence)",
+        "text": "My relationship with new experiences is best described as…",
+        "A": "I enjoy exploring new ideas, places, and perspectives whenever I can",
+        "B": "I like mixing familiar routines with occasional new experiences",
+        "C": "I usually feel most comfortable with familiar environments and patterns",
+        "D": "Write your own answer",
     },
     "S6": {
-        "text": "When I’m seeing someone I like, I prefer…",
-        "A": "Exclusive pretty quickly",
-        "B": "Take time, then commit if it’s right",
-        "C": "Keep it flexible / not define it for a while",
-        "D": "Other (one sentence)",
+        "text": "When I’m dating someone I’m interested in, I usually feel most comfortable when…",
+        "A": "The connection becomes clearly exclusive fairly early",
+        "B": "Exclusivity develops gradually as the relationship grows",
+        "C": "The connection stays open and undefined for a while",
+        "D": "Write your own answer",
     },
 }
 
 PHASE2_QUESTIONS = {
     "P1": {
-        "text": "I’m most attracted to someone who is…",
-        "A": "Warm and emotionally available",
-        "B": "Honest, blunt, intellectually sharp",
-        "C": "Independent, low-drama, needs space",
-        "D": "Other (one sentence)",
+        "text": "The type of person I’m naturally drawn to is someone who…",
+        "A": "Feels emotionally warm and present with people",
+        "B": "Values honesty and speaks their mind clearly",
+        "C": "Has a strong independent streak and their own space",
+        "D": "Write your own answer",
     },
     "P2": {
-        "text": "Instant turn-off for me is…",
-        "A": "Flaky / unreliable",
-        "B": "Controlling / jealous",
-        "C": "Emotionally cold / unavailable",
-        "D": "Other (one sentence)",
+        "text": "One dynamic that tends to drain my interest quickly is when someone…",
+        "A": "Often changes plans or struggles with consistency",
+        "B": "Feels overly controlling or tries to manage everything",
+        "C": "Keeps emotional distance most of the time",
+        "D": "Write your own answer",
     },
     "P3": {
-        "text": "After a fight, my ideal person…",
-        "A": "Owns it fast and repairs",
-        "B": "Needs space, then repairs",
-        "C": "Pretends nothing happened / avoids repair",
-        "D": "Other (one sentence)",
+        "text": "After a disagreement, I appreciate someone who…",
+        "A": "Addresses the issue and works toward resolving it together",
+        "B": "Takes a little space first, then reconnects to sort things out",
+        "C": "Lets time smooth things over before revisiting it",
+        "D": "Write your own answer",
     },
     "P4": {
-        "text": "My ideal relationship structure is…",
-        "A": "Strictly monogamous",
-        "B": "Mostly monogamous, some flexibility",
-        "C": "Open / ENM-friendly",
-        "D": "Other (one sentence)",
+        "text": "My preferred relationship structure tends to be…",
+        "A": "Clearly monogamous",
+        "B": "Mostly monogamous with some flexibility depending on the relationship",
+        "C": "Comfortable with open or non-monogamous dynamics",
+        "D": "Write your own answer",
     },
     "P5": {
-        "text": "The kind of person I keep liking is…",
-        "A": "Stable, kind, consistent (even if less exciting)",
-        "B": "A mix: solid + playful + some edge",
-        "C": "Intense / exciting / unpredictable (even if risky)",
-        "D": "Other (one sentence)",
+        "text": "The kind of partner I tend to stay interested in over time is someone who…",
+        "A": "Is steady, kind, and dependable",
+        "B": "Balances stability with some spontaneity",
+        "C": "Brings intensity and unpredictability into life",
+        "D": "Write your own answer",
     },
     "P6": {
-        "text": "I’m most drawn to someone who…",
-        "A": "Is curious and loves trying new things",
-        "B": "Enjoys some new stuff but also likes routine",
-        "C": "Prefers familiar routines and predictability",
-        "D": "Other (one sentence)",
+        "text": "I’m especially drawn to someone who…",
+        "A": "Is curious about the world and likes exploring new experiences",
+        "B": "Enjoys new experiences but also values routines",
+        "C": "Prefers stability and familiar patterns",
+        "D": "Write your own answer",
     },
 }
 
@@ -203,7 +200,7 @@ PHASE2_SCORES = {
 }
 
 # Trait -> question weights (diagnostic strength)
-# Only set weights where you *care*; missing falls back to 1.0 in scoring engine
+# Only set weights where you care; missing falls back to 1.0 in scoring engine
 TRAIT_WEIGHTS = {
     1: {"S1": 0.5, "S4": 0.6, "P1": 0.7, "P2": 0.6, "P5": 0.5},
     2: {"S3": 0.5, "S4": 0.6, "P2": 0.4},
