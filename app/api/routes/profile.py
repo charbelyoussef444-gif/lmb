@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from app.db.engine import engine
 from app.deps.auth import get_current_user_id
+from app.services.supabase import sb
 
 # ✅ storage cleanup (best-effort)
 from app.services.storage import delete_prefix
@@ -494,37 +495,59 @@ async def complete_onboarding(
     return _row_to_profile_out(row)
 
 
-# ✅ Delete my account (match Supabase behavior: delete the users row; DB cascades handle the rest)
+# ✅ Delete my account
 @router.delete("", status_code=204)
 async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
     uid = str(user_id)
     logger.info("delete_me uid=%s", uid)
 
-    # Best-effort storage cleanup (outside DB txn)
+    # Best-effort storage cleanup first
     for prefix in (f"gallery/{uid}/", f"kyc/{uid}/"):
         try:
             await delete_prefix(prefix)
         except Exception:
             logger.exception("Storage cleanup failed for prefix=%s", prefix)
 
+    # Delete app/profile row
     try:
         async with engine.begin() as conn:
             res = await conn.execute(
                 text("delete from public.users where id = :uid"),
                 {"uid": uid},
             )
-    except IntegrityError:
-        # If you hit this, then a FK is RESTRICT (Supabase delete would fail too)
-        raise HTTPException(409, "Cannot delete user due to dependent rows (FK restrict)")
-    except SQLAlchemyError:
-        logger.exception("DB error during delete user uid=%s", uid)
-        raise HTTPException(500, "DB error while deleting account")
 
-    # sanity check
+            if res.rowcount == 0:
+                raise HTTPException(status_code=404, detail="User not found")
+
+    except IntegrityError as e:
+        logger.exception("IntegrityError during delete user uid=%s", uid)
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete user because related rows still reference this account",
+        ) from e
+
+    except HTTPException:
+        raise
+
+    except SQLAlchemyError as e:
+        logger.exception("DB error during delete user uid=%s", uid)
+        raise HTTPException(
+            status_code=500,
+            detail="DB error while deleting account",
+        ) from e
+
+    # Delete Supabase Auth account
     try:
-        if res.rowcount == 0:
-            raise HTTPException(404, "User not found")
-    except Exception:
-        pass
+        # keep soft_delete=False for real permanent deletion
+        sb.auth.admin.delete_user(uid, should_soft_delete=False)
+    except Exception as e:
+        logger.exception("Supabase auth delete failed uid=%s", uid)
+
+        # At this point public.users is already gone, but auth user still exists.
+        # Return 500 so the client knows the deletion was not fully completed.
+        raise HTTPException(
+            status_code=500,
+            detail="Profile row deleted, but failed to delete auth account",
+        ) from e
 
     return Response(status_code=204)
