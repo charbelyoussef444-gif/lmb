@@ -6,8 +6,36 @@ from pydantic import BaseModel
 from app.deps.admin import require_admin
 from app.services.storage import list_prefix, signed_url, delete_paths
 from app.services.supabase import sb  # service-role client
+from app.services.mail import send_email
 
 router = APIRouter(prefix="/admin/kyc", tags=["admin-kyc"])
+
+
+def _approved_email_text(full_name: str | None) -> str:
+    name = (full_name or "there").strip()
+    return f"""Hello {name},
+
+Your LikeMinded verification has been approved.
+
+Your account is now verified and ready to use.
+
+— LikeMinded
+"""
+
+
+def _rejected_email_text(full_name: str | None, reason: str) -> str:
+    name = (full_name or "there").strip()
+    return f"""Hello {name},
+
+Your LikeMinded verification was rejected.
+
+Reason:
+{reason}
+
+Please go back to the app and upload new verification images.
+
+— LikeMinded
+"""
 
 
 @router.get("/pending")
@@ -73,14 +101,38 @@ async def get_images_for_review(
 async def approve_user(
     target_user_id: uuid.UUID, _: uuid.UUID = Depends(require_admin)
 ):
+    db = sb.postgrest
+
+    user_row = (
+        db.from_("users")
+        .select("full_name,email")
+        .eq("id", str(target_user_id))
+        .single()
+        .execute()
+        .data
+    )
+
+    if not user_row:
+        raise HTTPException(404, "User not found")
+
     prefix = f"{target_user_id}/kyc"
     items = list_prefix(prefix)
     keys = [f"{prefix}/{it['name']}" for it in items if it.get("name")]
-    delete_paths(keys)
 
-    db = sb.postgrest
     db.from_("users").update({"verified": True}).eq("id", str(target_user_id)).execute()
     db.from_("kyc_verification").delete().eq("user_id", str(target_user_id)).execute()
+
+    if keys:
+        delete_paths(keys)
+
+    email = (user_row.get("email") or "").strip()
+    if email:
+        await send_email(
+            to_email=email,
+            subject="Your LikeMinded verification was approved",
+            text=_approved_email_text(user_row.get("full_name")),
+        )
+
     return {"ok": True}
 
 
@@ -98,15 +150,39 @@ async def reject_user(
     if not reason:
         raise HTTPException(400, "Reason required")
 
+    db = sb.postgrest
+
+    user_row = (
+        db.from_("users")
+        .select("full_name,email")
+        .eq("id", str(target_user_id))
+        .single()
+        .execute()
+        .data
+    )
+
+    if not user_row:
+        raise HTTPException(404, "User not found")
+
     prefix = f"{target_user_id}/kyc"
     items = list_prefix(prefix)
     keys = [f"{prefix}/{it['name']}" for it in items if it.get("name")]
-    delete_paths(keys)
 
-    db = sb.postgrest
     db.from_("users").update({"verified": False}).eq("id", str(target_user_id)).execute()
     db.from_("kyc_verification").delete().eq("user_id", str(target_user_id)).execute()
     db.from_("kyc_rejection_reasons").insert(
         {"user_id": str(target_user_id), "reason": reason}
     ).execute()
+
+    if keys:
+        delete_paths(keys)
+
+    email = (user_row.get("email") or "").strip()
+    if email:
+        await send_email(
+            to_email=email,
+            subject="Your LikeMinded verification was rejected",
+            text=_rejected_email_text(user_row.get("full_name"), reason),
+        )
+
     return {"ok": True}
