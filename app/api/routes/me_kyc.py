@@ -106,7 +106,7 @@ async def upload_kyc_images(
 ):
     """
     Upload verification images and mark request as pending:
-      - require exactly 3 images
+      - require exactly 2 images
       - store each file under {user}/kyc/<uuid>.<ext>
       - upsert into kyc_verification
       - clear any old rejection reasons
@@ -116,34 +116,31 @@ async def upload_kyc_images(
     if not files:
         raise HTTPException(400, "No files uploaded")
 
-    # Your frontend is enforcing 3; backend should enforce too.
-    if len(files) != 3:
-        raise HTTPException(400, "Please upload exactly 3 verification images.")
+    if len(files) != 2:
+        raise HTTPException(400, "Please upload exactly 2 verification images.")
 
     uid = str(user_id)
 
-    # Upload files to storage (best to fail fast before DB updates)
+    # Upload files to storage first
     for f in files:
         if not (f.content_type or "").startswith("image/"):
             raise HTTPException(400, "All files must be images.")
         key = make_kyc_key(uid)
         await upload_file_to_key(f, key)
 
-    # DB updates + fetch name for telegram
     async with engine.begin() as conn:
-        # ensure user exists + get name
         u = (
             await conn.execute(
                 text("select full_name from users where id = :uid"),
                 {"uid": uid},
             )
         ).mappings().first()
+
         if not u:
             raise HTTPException(404, "User not found")
 
         full_name = (u.get("full_name") or "Unknown").strip()
 
-        # upsert pending request
         await conn.execute(
             text(
                 """
@@ -156,22 +153,19 @@ async def upload_kyc_images(
             {"uid": uid},
         )
 
-        # clear previous rejection reasons
         await conn.execute(
             text("delete from kyc_rejection_reasons where user_id = :uid"),
             {"uid": uid},
         )
 
-    # Telegram notify AFTER DB commit succeeds (engine.begin commits on exit)
     await _send_telegram(
         "🆕 <b>Verification pending</b>\n\n"
         f"<b>Name:</b> {full_name}\n"
         f"<b>User ID:</b> {uid}\n\n"
-        "User submitted 3 images. Review required."
+        "User submitted 2 images. Review required."
     )
 
     return {"ok": True, "count": len(files)}
-
 
 @router.delete("/cancel")
 async def cancel_kyc(user_id: uuid.UUID = Depends(get_current_user_id)):
