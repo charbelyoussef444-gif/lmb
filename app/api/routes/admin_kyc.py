@@ -38,6 +38,67 @@ Please go back to the app and upload new verification images.
 """
 
 
+def _extract_auth_email(auth_response) -> str | None:
+    # Handles common supabase-py response shapes safely
+    if auth_response is None:
+        return None
+
+    user = getattr(auth_response, "user", None)
+    if user is not None:
+        email = getattr(user, "email", None)
+        if email:
+            return email
+
+    if isinstance(auth_response, dict):
+        user_dict = auth_response.get("user") or {}
+        email = user_dict.get("email")
+        if email:
+            return email
+
+    data = getattr(auth_response, "data", None)
+    if data is not None:
+        user = getattr(data, "user", None)
+        if user is not None:
+            email = getattr(user, "email", None)
+            if email:
+                return email
+
+        if isinstance(data, dict):
+            user_dict = data.get("user") or {}
+            email = user_dict.get("email")
+            if email:
+                return email
+
+    return None
+
+
+def _get_user_profile_and_email(target_user_id: uuid.UUID) -> tuple[str | None, str | None]:
+    db = sb.postgrest
+
+    profile_row = (
+        db.from_("users")
+        .select("full_name")
+        .eq("id", str(target_user_id))
+        .single()
+        .execute()
+        .data
+    )
+
+    if not profile_row:
+        raise HTTPException(404, "User not found")
+
+    full_name = profile_row.get("full_name")
+
+    try:
+        auth_response = sb.auth.admin.get_user_by_id(str(target_user_id))
+        email = _extract_auth_email(auth_response)
+    except Exception as e:
+        print(f"[admin_kyc] failed to fetch auth email for {target_user_id}: {e}")
+        email = None
+
+    return full_name, email
+
+
 @router.get("/pending")
 async def list_pending(_: uuid.UUID = Depends(require_admin)):
     db = sb.postgrest
@@ -103,17 +164,7 @@ async def approve_user(
 ):
     db = sb.postgrest
 
-    user_row = (
-        db.from_("users")
-        .select("full_name,email")
-        .eq("id", str(target_user_id))
-        .single()
-        .execute()
-        .data
-    )
-
-    if not user_row:
-        raise HTTPException(404, "User not found")
+    full_name, email = _get_user_profile_and_email(target_user_id)
 
     prefix = f"{target_user_id}/kyc"
     items = list_prefix(prefix)
@@ -125,13 +176,15 @@ async def approve_user(
     if keys:
         delete_paths(keys)
 
-    email = (user_row.get("email") or "").strip()
     if email:
-        await send_email(
-            to_email=email,
-            subject="Your LikeMinded verification was approved",
-            text=_approved_email_text(user_row.get("full_name")),
-        )
+        try:
+            await send_email(
+                to_email=email,
+                subject="Your LikeMinded verification was approved",
+                text=_approved_email_text(full_name),
+            )
+        except Exception as e:
+            print(f"[admin_kyc] failed to send approval email to {email}: {e}")
 
     return {"ok": True}
 
@@ -152,17 +205,7 @@ async def reject_user(
 
     db = sb.postgrest
 
-    user_row = (
-        db.from_("users")
-        .select("full_name,email")
-        .eq("id", str(target_user_id))
-        .single()
-        .execute()
-        .data
-    )
-
-    if not user_row:
-        raise HTTPException(404, "User not found")
+    full_name, email = _get_user_profile_and_email(target_user_id)
 
     prefix = f"{target_user_id}/kyc"
     items = list_prefix(prefix)
@@ -177,12 +220,14 @@ async def reject_user(
     if keys:
         delete_paths(keys)
 
-    email = (user_row.get("email") or "").strip()
     if email:
-        await send_email(
-            to_email=email,
-            subject="Your LikeMinded verification was rejected",
-            text=_rejected_email_text(user_row.get("full_name"), reason),
-        )
+        try:
+            await send_email(
+                to_email=email,
+                subject="Your LikeMinded verification was rejected",
+                text=_rejected_email_text(full_name, reason),
+            )
+        except Exception as e:
+            print(f"[admin_kyc] failed to send rejection email to {email}: {e}")
 
     return {"ok": True}
