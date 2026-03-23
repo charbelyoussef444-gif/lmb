@@ -1035,3 +1035,32 @@ async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
         score=round(final_score_for_db, 4),
         conversation_id=convo_id or "",
     )
+    
+@router.get("/personality-pref")
+async def get_personality_pref(user_id: uuid.UUID = Depends(get_current_user_id)):
+    """Return the user's preferred personality traits (what they want in a partner)."""
+    async with engine.begin() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    """
+                    select pt.id, pt.name, pt.description, upp.score
+                    from user_personality_pref upp
+                    join personality_traits pt on pt.id = upp.trait_id
+                    where upp.user_id = :uid
+                    order by pt.id
+                    """
+                ),
+                {"uid": str(user_id)},
+            )
+        ).mappings().all()
+
+        return [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "description": r["description"],
+                "score": float(r["score"]) if r["score"] is not None else None,
+            }
+            for r in rows
+        ]
