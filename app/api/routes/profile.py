@@ -551,3 +551,19 @@ async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
         ) from e
 
     return Response(status_code=204)
+
+
+@router.get("/auth/check-email")
+async def check_email(email: str):
+    async with engine.begin() as conn:
+        row = (await conn.execute(text("""
+            SELECT id, raw_app_meta_data->>'provider' as provider
+            FROM auth.users
+            WHERE email = :email
+            LIMIT 1
+        """), {"email": email.lower()})).mappings().first()
+        
+        if not row:
+            return {"exists": False, "provider": None}
+        return {"exists": True, "provider": row["provider"]}
+
