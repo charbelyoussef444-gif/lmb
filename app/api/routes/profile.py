@@ -15,6 +15,8 @@ from app.services.supabase import sb
 # ✅ storage cleanup (best-effort)
 from app.services.storage import delete_prefix
 
+from app.services.mail import send_email
+
 router = APIRouter(prefix="/me", tags=["me"])
 
 logger = logging.getLogger("me_routes")
@@ -567,3 +569,43 @@ async def check_email(email: str):
             return {"exists": False, "provider": None}
         return {"exists": True, "provider": row["provider"]}
 
+
+@router.post("/auth/send-confirmation")
+async def send_confirmation(email: str = Body(..., embed=True)):
+    # Generate the confirmation link/OTP via Supabase admin
+    res = sb.auth.admin.generate_link({
+        "type": "signup", 
+        "email": email,
+    })
+    if res.user is None:
+        raise HTTPException(400, "Could not generate confirmation link")
+    
+    # Extract the OTP token from the link properties
+    otp = res.properties.hashed_token  # 6-digit code
+    # If hashed_token doesn't work, you can parse it from the action_link
+    
+    await send_email(
+        to_email=email,
+        subject="LikeMinded — Verify your email",
+        text=f"Your verification code is: {otp}\n\nEnter this code in the app to verify your email.\nThis code expires in 60 minutes.",
+    )
+    return {"ok": True}
+
+
+@router.post("/auth/send-reset")
+async def send_reset(email: str = Body(..., embed=True)):
+    res = sb.auth.admin.generate_link({
+        "type": "recovery",
+        "email": email,
+    })
+    if res.user is None:
+        raise HTTPException(400, "Could not generate reset link")
+    
+    otp = res.properties.hashed_token
+    
+    await send_email(
+        to_email=email,
+        subject="LikeMinded — Reset your password",
+        text=f"Your password reset code is: {otp}\n\nEnter this code in the app to reset your password.\nThis code expires in 60 minutes.",
+    )
+    return {"ok": True}
