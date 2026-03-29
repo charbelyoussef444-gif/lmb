@@ -1,12 +1,30 @@
 # app/api/routes/admin_kyc.py
+import hashlib
+import hmac
+import re
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Body
 from pydantic import BaseModel
 
+from app.core.config import settings
 from app.deps.admin import require_admin
 from app.services.storage import list_prefix, signed_url, delete_paths
 from app.services.supabase import sb  # service-role client
 from app.services.mail import send_email
+
+
+def _sanitize_id_number(raw: str) -> str:
+    """Strip spaces, dashes, dots and lowercase — keep only alphanumeric chars."""
+    return re.sub(r"[^a-z0-9]", "", raw.strip().lower())
+
+
+def _hash_id_number(id_number: str) -> str:
+    """HMAC-SHA256 of the sanitised ID number using a server-side secret."""
+    clean = _sanitize_id_number(id_number)
+    if not clean:
+        raise HTTPException(400, "ID number is empty after sanitisation.")
+    key = (settings.KYC_ID_HMAC_KEY or "").encode("utf-8")
+    return hmac.new(key, clean.encode("utf-8"), hashlib.sha256).hexdigest()
 
 router = APIRouter(prefix="/admin/kyc", tags=["admin-kyc"])
 
@@ -158,11 +176,38 @@ async def get_images_for_review(
     }
 
 
+class ApproveIn(BaseModel):
+    id_number: str
+
+
 @router.post("/{target_user_id}/approve")
 async def approve_user(
-    target_user_id: uuid.UUID, _: uuid.UUID = Depends(require_admin)
+    target_user_id: uuid.UUID,
+    payload: ApproveIn = Body(...),
+    _: uuid.UUID = Depends(require_admin),
 ):
+    id_number = (payload.id_number or "").strip()
+    if not id_number:
+        raise HTTPException(400, "ID number is required to approve.")
+
+    id_hash = _hash_id_number(id_number)
+
     db = sb.postgrest
+
+    # Check if this ID has already been used by someone else
+    existing = (
+        db.from_("kyc_id_hashes")
+        .select("id_hash")
+        .eq("id_hash", id_hash)
+        .execute()
+        .data
+    )
+    if existing:
+        raise HTTPException(
+            409,
+            "This ID number is already associated with another account. "
+            "Possible duplicate account.",
+        )
 
     full_name, email = _get_user_profile_and_email(target_user_id)
 
@@ -170,6 +215,8 @@ async def approve_user(
     items = list_prefix(prefix)
     keys = [f"{prefix}/{it['name']}" for it in items if it.get("name")]
 
+    # Store the hash, approve the user, clean up KYC row
+    db.from_("kyc_id_hashes").insert({"id_hash": id_hash}).execute()
     db.from_("users").update({"verified": True}).eq("id", str(target_user_id)).execute()
     db.from_("kyc_verification").delete().eq("user_id", str(target_user_id)).execute()
 

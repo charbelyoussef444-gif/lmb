@@ -11,6 +11,9 @@ class Settings:
     SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")  # only for HS256 projects
     STORAGE_BUCKET = os.getenv("STORAGE_BUCKET", "user-photos")
 
+    # Secret key used to HMAC-hash ID numbers for duplicate detection
+    KYC_ID_HMAC_KEY = os.getenv("KYC_ID_HMAC_KEY", "")
+
     # CORS
     CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
