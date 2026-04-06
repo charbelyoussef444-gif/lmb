@@ -86,7 +86,7 @@ async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
         await conn.execute(
             text(
                 """
-                select id, verified, banned, last_match_date
+                select id, verified, banned, last_match_date, age, gender
                 from users
                 where id = :uid
                 """
@@ -103,6 +103,8 @@ async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
             "not_banned": False,
             "has_interest": False,
             "has_photos": False,
+            "has_age": False,
+            "has_gender": False,
             "photos_count": 0,
             "interests_count": 0,
             "last_match_date": None,
@@ -169,6 +171,11 @@ async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
     not_banned = not banned
     last_match_date = u.get("last_match_date")
 
+    age_val = u.get("age")
+    gender_val = u.get("gender")
+    has_age = age_val is not None
+    has_gender = gender_val is not None and str(gender_val).strip() != ""
+
     return {
         "exists": True,
         "verified": verified,
@@ -176,6 +183,8 @@ async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
         "not_banned": not_banned,
         "has_interest": has_interest,
         "has_photos": has_photos,
+        "has_age": has_age,
+        "has_gender": has_gender,
         "photos_count": photos_count,
         "interests_count": interests_count,
         "last_match_date": last_match_date,
@@ -198,6 +207,10 @@ def _build_missing_reasons(checks: Dict[str, Any]) -> Dict[str, Any]:
     missing = []
     if not checks.get("not_banned", False):
         missing.append("Your account is banned.")
+    if checks.get("has_age") is False:
+        missing.append("Add your age to your profile.")
+    if checks.get("has_gender") is False:
+        missing.append("Add your gender to your profile.")
     if checks.get("verified") is False:
         missing.append("Your account is not verified.")
     if checks.get("assessment_completed") is False:
@@ -487,6 +500,8 @@ async def _is_user_eligible_new_checks(conn, user_id: uuid.UUID) -> Tuple[bool, 
         and checks["not_banned"]
         and checks["has_interest"]
         and checks["has_photos"]
+        and checks.get("has_age", False)
+        and checks.get("has_gender", False)
     )
 
     if not req_ok:
@@ -870,6 +885,8 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
                     "not_banned": False,
                     "has_interest": False,
                     "has_photos": False,
+                    "has_age": False,
+                    "has_gender": False,
                     "photos_count": 0,
                     "interests_count": 0,
                 },
@@ -884,6 +901,8 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
             and checks["not_banned"]
             and checks["has_interest"]
             and checks["has_photos"]
+            and checks.get("has_age", False)
+            and checks.get("has_gender", False)
         )
 
         eligible_now = req_ok
@@ -910,6 +929,8 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
                 "not_banned": checks["not_banned"],
                 "has_interest": checks["has_interest"],
                 "has_photos": checks["has_photos"],
+                "has_age": checks.get("has_age", False),
+                "has_gender": checks.get("has_gender", False),
                 "photos_count": checks["photos_count"],
                 "interests_count": checks["interests_count"],
             },
