@@ -506,7 +506,7 @@ async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
     # Best-effort storage cleanup first
     for prefix in (f"gallery/{uid}/", f"kyc/{uid}/"):
         try:
-            await delete_prefix(prefix)
+            delete_prefix(prefix)
         except Exception:
             logger.exception("Storage cleanup failed for prefix=%s", prefix)
 
@@ -516,12 +516,19 @@ async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
     except Exception:
         logger.exception("Failed to delete kyc_id_hashes for uid=%s", uid)
 
-    # Delete rows that reference the user's messages/conversations
+    # Delete events that reference messages in any of this user's conversations
     # (events.message_id FK blocks cascade deletion of messages)
     try:
         async with engine.begin() as conn:
             await conn.execute(
-                text("DELETE FROM events WHERE user_id = :uid"),
+                text("""
+                    DELETE FROM events
+                    WHERE message_id IN (
+                        SELECT m.id FROM messages m
+                        JOIN conversations c ON c.id = m.conversation_id
+                        WHERE c.user_a_id = :uid OR c.user_b_id = :uid
+                    )
+                """),
                 {"uid": uid},
             )
     except Exception:
