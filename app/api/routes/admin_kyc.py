@@ -216,7 +216,7 @@ async def approve_user(
     keys = [f"{prefix}/{it['name']}" for it in items if it.get("name")]
 
     # Store the hash, approve the user, clean up KYC row
-    db.from_("kyc_id_hashes").insert({"id_hash": id_hash}).execute()
+    db.from_("kyc_id_hashes").insert({"id_hash": id_hash, "user_id": str(target_user_id)}).execute()
     db.from_("users").update({"verified": True}).eq("id", str(target_user_id)).execute()
     db.from_("kyc_verification").delete().eq("user_id", str(target_user_id)).execute()
 

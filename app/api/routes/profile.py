@@ -510,6 +510,12 @@ async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
         except Exception:
             logger.exception("Storage cleanup failed for prefix=%s", prefix)
 
+    # Delete KYC hash so the user can re-register with the same ID
+    try:
+        sb.postgrest.from_("kyc_id_hashes").delete().eq("user_id", uid).execute()
+    except Exception:
+        logger.exception("Failed to delete kyc_id_hashes for uid=%s", uid)
+
     # Delete app/profile row
     try:
         async with engine.begin() as conn:
