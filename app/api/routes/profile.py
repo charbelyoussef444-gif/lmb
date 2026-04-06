@@ -516,6 +516,17 @@ async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
     except Exception:
         logger.exception("Failed to delete kyc_id_hashes for uid=%s", uid)
 
+    # Delete rows that reference the user's messages/conversations
+    # (events.message_id FK blocks cascade deletion of messages)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM events WHERE user_id = :uid"),
+                {"uid": uid},
+            )
+    except Exception:
+        logger.exception("Failed to delete events for uid=%s", uid)
+
     # Delete app/profile row
     try:
         async with engine.begin() as conn:
