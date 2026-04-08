@@ -44,3 +44,24 @@ async def clear_logs(_: uuid.UUID = Depends(get_current_user_id)):
     """Clear the in-memory log buffer."""
     log_buffer.clear()
     return {"ok": True}
+
+@router.post("/__debug/test-push")
+async def test_push(user_id: uuid.UUID = Depends(get_current_user_id)):
+    """Send a test push notification to the current user."""
+    import logging
+    logger = logging.getLogger("uvicorn.error")
+    logger.info("[debug] test-push called for user %s", str(user_id))
+    try:
+        from app.core.firebase import send_push
+        logger.info("[debug] send_push imported OK")
+        await send_push(
+            user_id=str(user_id),
+            title="Test Notification",
+            body="If you see this, push notifications are working!",
+            data={"type": "test", "channel_id": "messages"},
+        )
+        logger.info("[debug] send_push completed")
+        return {"ok": True, "message": "Push sent — check your phone"}
+    except Exception as e:
+        logger.exception("[debug] test-push FAILED: %s", e)
+        return {"ok": False, "error": str(e)}
