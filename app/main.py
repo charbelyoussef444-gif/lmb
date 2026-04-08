@@ -37,9 +37,6 @@ from app.api.routes.device_tokens import router as device_tokens_router
 from app.api.routes.stats import router as stats_router
 
 
-from app.core import log_buffer
-log_buffer.install()
-
 logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="LikeMinded API (MVP)")

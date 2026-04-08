@@ -513,11 +513,7 @@ async def send_message(
     pass
 
   # --- FCM push to receiver ---
-  import logging as _logging
-  _fcm_log = _logging.getLogger("uvicorn.error")
-  _fcm_log.info("[conversations] FCM block reached — sender=%s receiver=%s cid=%s", str(user_id), str(other), cid)
   try:
-    # Get sender name for notification
     async with engine.begin() as conn2:
       sender_row = (await conn2.execute(
         text("SELECT full_name FROM users WHERE id::text = :uid"),
@@ -525,16 +521,14 @@ async def send_message(
       )).mappings().first()
     sender_name = (sender_row or {}).get("full_name") or "Someone"
     preview = (row["content_text"] or "")[:80]
-    _fcm_log.info("[conversations] Calling send_push — to=%s name=%s preview=%s", str(other), sender_name, preview[:30])
     await send_push(
       user_id=str(other),
       title=f"{sender_name}",
       body=preview,
       data={"type": "new_message", "conversationId": cid, "partnerName": sender_name, "channel_id": "messages"},
     )
-    _fcm_log.info("[conversations] send_push returned OK")
-  except Exception as _fcm_err:
-    _fcm_log.exception("[conversations] FCM push FAILED: %s", _fcm_err)
+  except Exception:
+    pass
 
   return MessageOut(
     id=row["id"],

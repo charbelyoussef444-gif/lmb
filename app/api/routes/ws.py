@@ -144,7 +144,6 @@ async def ws_conversation(ws: WebSocket, cid: str):
                             )).mappings().first()
                         sender_name = (sender_row or {}).get("full_name") or "Someone"
                         preview = (row["content_text"] or "")[:80]
-                        log.info("[ws] Sending FCM push to %s", str(other_uuid))
                         await send_push(
                             user_id=str(other_uuid),
                             title=f"{sender_name}",
