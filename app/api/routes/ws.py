@@ -9,6 +9,7 @@ from sqlalchemy import text
 from app.db.engine import engine
 from app.realtime.manager import manager
 from app.deps.auth import get_ws_user_id
+from app.core.firebase import send_push
 
 log = getLogger("uvicorn.error")
 
@@ -133,6 +134,30 @@ async def ws_conversation(ws: WebSocket, cid: str):
                             },
                         },
                     )
+
+                    # --- FCM push to receiver ---
+                    try:
+                        async with engine.begin() as conn2:
+                            sender_row = (await conn2.execute(
+                                text("SELECT full_name FROM users WHERE id = :uid"),
+                                {"uid": user_uuid},
+                            )).mappings().first()
+                        sender_name = (sender_row or {}).get("full_name") or "Someone"
+                        preview = (row["content_text"] or "")[:80]
+                        log.info("[ws] Sending FCM push to %s", str(other_uuid))
+                        await send_push(
+                            user_id=str(other_uuid),
+                            title=f"{sender_name}",
+                            body=preview,
+                            data={
+                                "type": "new_message",
+                                "conversationId": cid,
+                                "partnerName": sender_name,
+                                "channel_id": "messages",
+                            },
+                        )
+                    except Exception as e:
+                        log.exception("[ws] FCM push failed: %s", e)
 
             elif typ == "typing":
                 await manager.broadcast(
