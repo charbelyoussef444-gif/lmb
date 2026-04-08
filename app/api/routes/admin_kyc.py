@@ -11,6 +11,7 @@ from app.deps.admin import require_admin
 from app.services.storage import list_prefix, signed_url, delete_paths
 from app.services.supabase import sb  # service-role client
 from app.services.mail import send_email
+from app.core.firebase import send_push
 
 
 def _sanitize_id_number(raw: str) -> str:
@@ -233,6 +234,17 @@ async def approve_user(
         except Exception as e:
             print(f"[admin_kyc] failed to send approval email to {email}: {e}")
 
+    # --- FCM push: notify user of approval ---
+    try:
+        await send_push(
+            user_id=str(target_user_id),
+            title="Verification Approved ✅",
+            body="Your identity has been verified. You're all set!",
+            data={"type": "kyc_approved", "channel_id": "verification"},
+        )
+    except Exception:
+        pass
+
     return {"ok": True}
 
 
@@ -276,5 +288,16 @@ async def reject_user(
             )
         except Exception as e:
             print(f"[admin_kyc] failed to send rejection email to {email}: {e}")
+
+    # --- FCM push: notify user of rejection ---
+    try:
+        await send_push(
+            user_id=str(target_user_id),
+            title="Verification Update",
+            body="Your verification needs attention. Please check and resubmit.",
+            data={"type": "kyc_rejected", "channel_id": "verification"},
+        )
+    except Exception:
+        pass
 
     return {"ok": True}

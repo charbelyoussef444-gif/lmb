@@ -30,6 +30,9 @@ from app.api.routes.assesment import router as assessment_router
 from app.api.routes import match_feedback
 from app.api.routes import reports
 
+# Device tokens (push notifications)
+from app.api.routes.device_tokens import router as device_tokens_router
+
 # Stats
 from app.api.routes.stats import router as stats_router
 
@@ -156,6 +159,9 @@ app.include_router(events_router)
 app.include_router(assessment_router)
 app.include_router(match_feedback.router)
 app.include_router(reports.router)
+
+# Device tokens (push)
+app.include_router(device_tokens_router)
 
 # Stats
 app.include_router(stats_router)

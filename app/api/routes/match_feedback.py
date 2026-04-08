@@ -7,6 +7,7 @@ from sqlalchemy import text
 from app.db.engine import engine
 from app.deps.auth import get_current_user_id
 from app.realtime.manager import manager  # broadcast event
+from app.core.firebase import send_push
 
 router = APIRouter(prefix="/conversations", tags=["match-feedback"])
 
@@ -156,6 +157,30 @@ async def submit_match_feedback(
             )
         except Exception:
             pass
+
+    # --- FCM pushes ---
+    try:
+        partner_id = str(conv["user_b_id"]) if str(user_id) == str(conv["user_a_id"]) else str(conv["user_a_id"])
+
+        if photos_unlocked:
+            # Both said yes — notify both users
+            for uid in [str(conv["user_a_id"]), str(conv["user_b_id"])]:
+                await send_push(
+                    user_id=uid,
+                    title="Photos Unlocked!",
+                    body="You both liked this match! View each other's photos now.",
+                    data={"type": "photos_unlocked", "conversationId": cid, "channel_id": "photos"},
+                )
+        elif body.response is True:
+            # Current user said yes — notify partner (only if partner hasn't answered yet)
+            await send_push(
+                user_id=partner_id,
+                title="Your match is satisfied!",
+                body="Your match gave positive feedback. Share yours now!",
+                data={"type": "partner_feedback", "conversationId": cid, "channel_id": "feedback"},
+            )
+    except Exception:
+        pass
 
     return FeedbackOut(
         conversation_id=cid,

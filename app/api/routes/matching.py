@@ -16,6 +16,7 @@ from openai import AsyncOpenAI
 
 from app.db.engine import engine
 from app.deps.auth import get_current_user_id
+from app.core.firebase import send_push
 
 router = APIRouter(prefix="/matching", tags=["matching"])
 logger = logging.getLogger(__name__)
@@ -1048,6 +1049,22 @@ async def generate_match(user_id: uuid.UUID = Depends(get_current_user_id)):
                 )
         except Exception as e:
             logger.exception("Failed to insert match intro (non-fatal): %s", e)
+
+    # --- FCM push: notify matched user (user_b) ---
+    if convo_id and b_id:
+        try:
+            await send_push(
+                user_id=b_id,
+                title="New Match! 🎉",
+                body="You've been matched with someone compatible. Start chatting now!",
+                data={
+                    "type": "new_match",
+                    "conversationId": convo_id,
+                    "channel_id": "matches",
+                },
+            )
+        except Exception:
+            pass
 
     return MatchResultSuccess(
         status="matched",
