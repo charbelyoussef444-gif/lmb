@@ -145,13 +145,13 @@ async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
     photos_count_row = (
         await conn.execute(
             text(
-                f"""
+                """
                 select
                   case
-                    when to_regclass('public.{PHOTO_TABLE}') is null then 0
+                    when to_regclass('public.user_photos') is null then 0
                     else (
                       select count(*)::int
-                      from {PHOTO_TABLE}
+                      from user_photos
                       where user_id = :uid
                         and kind = 'gallery'
                         and photo_url is not null
