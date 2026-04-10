@@ -1,8 +1,10 @@
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from starlette.types import ASGIApp
 
@@ -165,6 +167,17 @@ app.include_router(device_tokens_router)
 
 # Stats
 app.include_router(stats_router)
+
+
+# -------------------
+# STATIC LEGAL DOCS
+# Serves privacy-policy.html, terms-of-service.html, child-safety.html, etc.
+# at /legal/<filename>. Used by App Store / Play Store listings.
+# -------------------
+
+_LEGAL_DIR = Path(__file__).parent / "static" / "legal"
+if _LEGAL_DIR.is_dir():
+    app.mount("/legal", StaticFiles(directory=str(_LEGAL_DIR), html=True), name="legal")
 
 
 # -------------------

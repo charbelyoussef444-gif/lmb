@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  body { margin: 0; padding: 0; background: #000; display: flex; align-items: center; justify-content: center; height: 100vh; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1024" height="500"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = 1024, H = 500;
+
+// Gradient background
+const grad = ctx.createLinearGradient(0, 0, W, H);
+grad.addColorStop(0, '#FF6B8A');
+grad.addColorStop(0.5, '#B45CF6');
+grad.addColorStop(1, '#8B5CF6');
+ctx.fillStyle = grad;
+ctx.fillRect(0, 0, W, H);
+
+// Subtle decorative circles
+ctx.globalAlpha = 0.08;
+ctx.fillStyle = '#fff';
+ctx.beginPath(); ctx.arc(180, 120, 200, 0, Math.PI * 2); ctx.fill();
+ctx.beginPath(); ctx.arc(850, 400, 250, 0, Math.PI * 2); ctx.fill();
+ctx.beginPath(); ctx.arc(500, 500, 180, 0, Math.PI * 2); ctx.fill();
+ctx.globalAlpha = 0.06;
+ctx.beginPath(); ctx.arc(750, 80, 150, 0, Math.PI * 2); ctx.fill();
+ctx.beginPath(); ctx.arc(100, 420, 130, 0, Math.PI * 2); ctx.fill();
+ctx.globalAlpha = 1;
+
+// Heart icon (simple path)
+function drawHeart(cx, cy, size) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(size, size);
+  ctx.beginPath();
+  ctx.moveTo(0, -0.5);
+  ctx.bezierCurveTo(-0.5, -1.2, -1.5, -0.8, -1.5, 0);
+  ctx.bezierCurveTo(-1.5, 0.8, 0, 1.5, 0, 2);
+  ctx.bezierCurveTo(0, 1.5, 1.5, 0.8, 1.5, 0);
+  ctx.bezierCurveTo(1.5, -0.8, 0.5, -1.2, 0, -0.5);
+  ctx.closePath();
+  ctx.restore();
+}
+
+// Small decorative hearts
+ctx.globalAlpha = 0.12;
+ctx.fillStyle = '#fff';
+drawHeart(150, 350, 25); ctx.fill();
+drawHeart(880, 130, 20); ctx.fill();
+drawHeart(700, 380, 15); ctx.fill();
+drawHeart(300, 100, 18); ctx.fill();
+ctx.globalAlpha = 1;
+
+// Connection dots and lines
+ctx.globalAlpha = 0.15;
+ctx.strokeStyle = '#fff';
+ctx.lineWidth = 1.5;
+const dots = [
+  [120, 180], [250, 80], [380, 160], [650, 90], [780, 170], [900, 100],
+  [150, 380], [300, 430], [500, 400], [700, 440], [880, 360]
+];
+for (let i = 0; i < dots.length; i++) {
+  for (let j = i + 1; j < dots.length; j++) {
+    const dx = dots[j][0] - dots[i][0];
+    const dy = dots[j][1] - dots[i][1];
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 250) {
+      ctx.beginPath();
+      ctx.moveTo(dots[i][0], dots[i][1]);
+      ctx.lineTo(dots[j][0], dots[j][1]);
+      ctx.stroke();
+    }
+  }
+}
+ctx.globalAlpha = 0.25;
+ctx.fillStyle = '#fff';
+dots.forEach(([x, y]) => {
+  ctx.beginPath();
+  ctx.arc(x, y, 4, 0, Math.PI * 2);
+  ctx.fill();
+});
+ctx.globalAlpha = 1;
+
+// App name
+ctx.textAlign = 'center';
+ctx.textBaseline = 'middle';
+
+// Shadow for text
+ctx.shadowColor = 'rgba(0,0,0,0.3)';
+ctx.shadowBlur = 20;
+ctx.shadowOffsetY = 4;
+
+ctx.font = 'bold 72px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+ctx.fillStyle = '#ffffff';
+ctx.fillText('LikeMinded', W / 2, H / 2 - 30);
+
+// Tagline
+ctx.shadowBlur = 10;
+ctx.shadowOffsetY = 2;
+ctx.font = '26px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+ctx.fillStyle = 'rgba(255,255,255,0.9)';
+ctx.fillText('Real connections, real compatibility', W / 2, H / 2 + 35);
+
+// Reset shadow
+ctx.shadowColor = 'transparent';
+ctx.shadowBlur = 0;
+ctx.shadowOffsetY = 0;
+
+// Download link
+const link = document.createElement('a');
+link.download = 'feature-graphic.png';
+link.href = canvas.toDataURL('image/png');
+link.textContent = 'Download PNG';
+link.style.cssText = 'position:fixed;top:10px;left:10px;color:#fff;font:16px sans-serif;background:#8B5CF6;padding:10px 20px;border-radius:8px;text-decoration:none;z-index:10;';
+document.body.appendChild(link);
+</script>
+</body>
+</html>
