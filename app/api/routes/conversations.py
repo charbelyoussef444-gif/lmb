@@ -55,7 +55,7 @@ class ConversationOut(BaseModel):
   id: str
   partnerName: str
   partnerAge: Optional[int] = None
-  partnerCity: Optional[int] = None  # kept as in your original typing? (if location is text, change to Optional[str])
+  partnerCity: Optional[str] = None
   lastMessage: Optional[str] = None
   lastAt: Optional[str] = None
   compatibility: Optional[float] = None
