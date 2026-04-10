@@ -137,7 +137,7 @@ select u.id::text,
        u.location_id,
        case
          when l.id is null then null
-         else concat_ws(', ', l.city, l.admin_name, l.country)
+         else concat_ws(', ', coalesce(l.city_ascii, l.city), l.admin_name, l.country)
        end as location_label,
        u.personality_weight,
        u.interests_weight,
@@ -205,10 +205,10 @@ async def list_cities(country: str = Query(..., min_length=1, max_length=128)):
             await conn.execute(
                 text(
                     """
-                    select id, city, admin_name
+                    select id, coalesce(city_ascii, city) as city, admin_name
                     from locations
                     where country = :c
-                    order by population desc nulls last, city asc
+                    order by coalesce(city_ascii, city) asc
                     """
                 )
             ,
