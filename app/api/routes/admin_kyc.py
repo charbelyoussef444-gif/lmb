@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from app.core.config import settings
 from app.deps.admin import require_admin
-from app.services.storage import list_prefix, signed_url, delete_paths
+from app.services.storage import list_prefix, signed_url, delete_paths, make_kyc_id_key
 from app.services.supabase import sb  # service-role client
 from app.services.mail import send_email
 from app.core.firebase import send_push
@@ -197,10 +197,6 @@ async def approve_user(
 
     full_name, email = _get_user_profile_and_email(target_user_id)
 
-    prefix = f"{target_user_id}/kyc"
-    items = list_prefix(prefix)
-    keys = [f"{prefix}/{it['name']}" for it in items if it.get("name")]
-
     # Insert hash first — relies on UNIQUE constraint on id_hash to prevent
     # race conditions (two concurrent approvals for the same ID).
     try:
@@ -219,8 +215,12 @@ async def approve_user(
     except Exception as exc:
         raise HTTPException(500, f"Failed to finalize KYC approval: {exc}")
 
-    if keys:
-        delete_paths(keys)
+    # Delete ONLY the ID document. Keep the selfie — it is reused later
+    # as the "verified selfie" reference for gallery photo review.
+    try:
+        delete_paths([make_kyc_id_key(str(target_user_id))])
+    except Exception as e:
+        print(f"[admin_kyc] failed to delete ID document for {target_user_id}: {e}")
 
     if email:
         try:
@@ -264,18 +264,18 @@ async def reject_user(
 
     full_name, email = _get_user_profile_and_email(target_user_id)
 
-    prefix = f"{target_user_id}/kyc"
-    items = list_prefix(prefix)
-    keys = [f"{prefix}/{it['name']}" for it in items if it.get("name")]
-
     db.from_("users").update({"verified": False}).eq("id", str(target_user_id)).execute()
     db.from_("kyc_verification").delete().eq("user_id", str(target_user_id)).execute()
     db.from_("kyc_rejection_reasons").insert(
         {"user_id": str(target_user_id), "reason": reason}
     ).execute()
 
-    if keys:
-        delete_paths(keys)
+    # Delete ONLY the ID document. Keep the selfie — it is reused later
+    # as the "verified selfie" reference for gallery photo review.
+    try:
+        delete_paths([make_kyc_id_key(str(target_user_id))])
+    except Exception as e:
+        print(f"[admin_kyc] failed to delete ID document for {target_user_id}: {e}")
 
     if email:
         try:

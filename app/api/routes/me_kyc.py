@@ -8,7 +8,8 @@ from sqlalchemy import text
 from app.db.engine import engine
 from app.deps.auth import get_current_user_id
 from app.services.storage import (
-    make_kyc_key,
+    make_kyc_id_key,
+    make_kyc_selfie_key,
     upload_file_to_key,
     delete_prefix,
 )
@@ -106,8 +107,10 @@ async def upload_kyc_images(
 ):
     """
     Upload verification images and mark request as pending:
-      - require exactly 2 images
-      - store each file under {user}/kyc/<uuid>.<ext>
+      - require exactly 2 images in strict order: [ID document, selfie]
+      - store at deterministic paths {user}/kyc/id.bin and {user}/kyc/selfie.bin
+        so admin can fetch the selfie later by path and approval can
+        surgically delete only the ID document
       - upsert into kyc_verification
       - clear any old rejection reasons
       - send Telegram message: "verification pending" + name + id
@@ -117,16 +120,20 @@ async def upload_kyc_images(
         raise HTTPException(400, "No files uploaded")
 
     if len(files) != 2:
-        raise HTTPException(400, "Please upload exactly 2 verification images.")
+        raise HTTPException(400, "Please upload exactly 2 verification images: ID and selfie.")
 
     uid = str(user_id)
 
-    # Upload files to storage first
-    for f in files:
+    id_file, selfie_file = files[0], files[1]
+    for f in (id_file, selfie_file):
         if not (f.content_type or "").startswith("image/"):
             raise HTTPException(400, "All files must be images.")
-        key = make_kyc_key(uid)
-        await upload_file_to_key(f, key)
+
+    # Order matters: index 0 = ID document, index 1 = selfie.
+    # Both clients (mobile VerificationScreen.handleSubmit, web ProfilePage kycSlots)
+    # upload in that order.
+    await upload_file_to_key(id_file, make_kyc_id_key(uid))
+    await upload_file_to_key(selfie_file, make_kyc_selfie_key(uid))
 
     async with engine.begin() as conn:
         u = (

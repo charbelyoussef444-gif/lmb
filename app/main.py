@@ -19,6 +19,7 @@ from app.api.routes import matching
 from app.api.routes.me import router as me_router
 from app.api.routes.me_kyc import router as me_kyc_router
 from app.api.routes.admin_kyc import router as admin_kyc_router
+from app.api.routes.admin_gallery import router as admin_gallery_router
 from app.api.routes.admin_users import router as admin_users_router
 from app.api.routes.admin_user_journey import router as admin_user_journey_router
 
@@ -149,6 +150,7 @@ app.include_router(matching.router)
 app.include_router(me_router)
 app.include_router(me_kyc_router)
 app.include_router(admin_kyc_router)
+app.include_router(admin_gallery_router)
 app.include_router(admin_users_router)
 app.include_router(admin_user_journey_router)
 

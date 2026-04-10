@@ -156,6 +156,7 @@ async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
                         and kind = 'gallery'
                         and photo_url is not null
                         and btrim(photo_url) <> ''
+                        and status = 'approved'
                     )
                   end as n
                 """

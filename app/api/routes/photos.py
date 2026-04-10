@@ -36,15 +36,28 @@ async def upload_gallery_photo(
     key = make_photo_key(str(user_id), "gallery", position)
     path = await upload_file(file, key)
 
+    # New upload / re-upload always enters the review queue as 'pending'.
+    # On conflict (same user + position), we also clear any previous
+    # rejection reason and reviewed_at, because this is a fresh submission.
     async with engine.begin() as conn:
         row = (
             await conn.execute(
                 text(
                     """
-            INSERT INTO user_photos (id, user_id, kind, photo_url, position, created_at)
-            VALUES (gen_random_uuid(), :uid, 'gallery', :url, :pos, now())
+            INSERT INTO user_photos (
+                id, user_id, kind, photo_url, position,
+                status, rejection_reason, reviewed_at, created_at
+            )
+            VALUES (
+                gen_random_uuid(), :uid, 'gallery', :url, :pos,
+                'pending', NULL, NULL, now()
+            )
             ON CONFLICT (user_id, kind, position)
-            DO UPDATE SET photo_url = EXCLUDED.photo_url
+            DO UPDATE SET
+                photo_url        = EXCLUDED.photo_url,
+                status           = 'pending',
+                rejection_reason = NULL,
+                reviewed_at      = NULL
             RETURNING id::text;
         """
                 ),
@@ -137,17 +150,23 @@ async def upload_verification_id(
 @me_photos_router.get("")
 async def list_my_photos(user_id: uuid.UUID = Depends(get_current_user_id)):
     """
-    Return signed URLs for MY gallery photos based on user_photos.photo_url.
+    Return MY gallery photos with review status.
 
-    IMPORTANT: returns a fixed 3-slot array aligned to positions 1..3:
-    [slot1_url_or_empty, slot2_url_or_empty, slot3_url_or_empty]
+    IMPORTANT: returns a fixed 3-slot array aligned to positions 1..3.
+    Empty slots are `null`. Populated slots are objects:
+        {
+          "position": 1..3,
+          "url": "<signed url>",
+          "status": "pending" | "approved" | "rejected",
+          "rejection_reason": "<string>" | null
+        }
     """
     async with engine.begin() as conn:
         rows = (
             await conn.execute(
                 text(
                     """
-            SELECT position, photo_url
+            SELECT position, photo_url, status, rejection_reason
             FROM user_photos
             WHERE user_id = :uid
               AND kind = 'gallery'
@@ -163,15 +182,20 @@ async def list_my_photos(user_id: uuid.UUID = Depends(get_current_user_id)):
 
     expires_in = 60 * 60 * 24 * 7  # 7 days
 
-    # fixed slots
-    out = ["", "", ""]  # position 1..3
+    # fixed slots — None means "empty slot"
+    out: list[dict | None] = [None, None, None]  # position 1..3
 
     for r in rows:
         pos = int(r["position"] or 0)
         if pos not in (1, 2, 3):
             continue
         signed = bucket.create_signed_url(path=r["photo_url"], expires_in=expires_in)
-        out[pos - 1] = signed["signedURL"]
+        out[pos - 1] = {
+            "position": pos,
+            "url": signed["signedURL"],
+            "status": r["status"] or "approved",
+            "rejection_reason": r["rejection_reason"],
+        }
 
     return out
 
@@ -223,6 +247,7 @@ async def list_conversation_photos(
             JOIN user_photos p ON p.id = a.photo_id
             WHERE a.conversation_id = :cid
               AND p.kind = 'gallery'
+              AND p.status = 'approved'
             ORDER BY p.position NULLS LAST, p.created_at ASC;
         """
                 ),

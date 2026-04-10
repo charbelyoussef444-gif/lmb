@@ -9,6 +9,8 @@ __all__ = [
     "upload_file",
     "make_photo_key",
     "make_kyc_key",
+    "make_kyc_id_key",
+    "make_kyc_selfie_key",
     "list_prefix",
     "create_signed_url",
     "signed_url",            # <-- add this
@@ -48,6 +50,16 @@ def make_photo_key(user_id: str, kind: str, position: int | None = None) -> str:
 # ---------- NEW: KYC helpers (non-breaking) ----------
 def make_kyc_key(user_id: str) -> str:
     return f"{user_id}/kyc/{uuid.uuid4()}.bin"
+
+
+# Deterministic paths so the admin can look up the selfie reliably and
+# approvals can surgically delete the ID while keeping the selfie.
+def make_kyc_id_key(user_id: str) -> str:
+    return f"{user_id}/kyc/id.bin"
+
+
+def make_kyc_selfie_key(user_id: str) -> str:
+    return f"{user_id}/kyc/selfie.bin"
 
 def list_prefix(prefix: str) -> List[Dict]:
     bucket = sb.storage.from_(settings.STORAGE_BUCKET)
