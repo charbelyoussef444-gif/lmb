@@ -195,31 +195,29 @@ async def approve_user(
 
     db = sb.postgrest
 
-    # Check if this ID has already been used by someone else
-    existing = (
-        db.from_("kyc_id_hashes")
-        .select("id_hash")
-        .eq("id_hash", id_hash)
-        .execute()
-        .data
-    )
-    if existing:
-        raise HTTPException(
-            409,
-            "This ID number is already associated with another account. "
-            "Possible duplicate account.",
-        )
-
     full_name, email = _get_user_profile_and_email(target_user_id)
 
     prefix = f"{target_user_id}/kyc"
     items = list_prefix(prefix)
     keys = [f"{prefix}/{it['name']}" for it in items if it.get("name")]
 
-    # Store the hash, approve the user, clean up KYC row
-    db.from_("kyc_id_hashes").insert({"id_hash": id_hash, "user_id": str(target_user_id)}).execute()
-    db.from_("users").update({"verified": True}).eq("id", str(target_user_id)).execute()
-    db.from_("kyc_verification").delete().eq("user_id", str(target_user_id)).execute()
+    # Insert hash first — relies on UNIQUE constraint on id_hash to prevent
+    # race conditions (two concurrent approvals for the same ID).
+    try:
+        db.from_("kyc_id_hashes").insert({"id_hash": id_hash, "user_id": str(target_user_id)}).execute()
+    except Exception:
+        raise HTTPException(
+            409,
+            "This ID number is already associated with another account. "
+            "Possible duplicate account.",
+        )
+
+    # Hash inserted successfully — safe to approve
+    try:
+        db.from_("users").update({"verified": True}).eq("id", str(target_user_id)).execute()
+        db.from_("kyc_verification").delete().eq("user_id", str(target_user_id)).execute()
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to finalize KYC approval: {exc}")
 
     if keys:
         delete_paths(keys)

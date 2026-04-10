@@ -55,7 +55,7 @@ class ConversationOut(BaseModel):
   id: str
   partnerName: str
   partnerAge: Optional[int] = None
-  partnerCity: Optional[int] = None  # kept as in your original typing? (if location is text, change to Optional[str])
+  partnerCity: Optional[str] = None
   lastMessage: Optional[str] = None
   lastAt: Optional[str] = None
   compatibility: Optional[float] = None
@@ -140,9 +140,9 @@ async def _get_my_feedback(conn, cid: str, me: uuid.UUID) -> Optional[bool]:
   row = (
     await conn.execute(
       text(
-        f"""
+        """
         select response
-        from {MATCH_FEEDBACK_TABLE}
+        from conversation_match_feedback
         where conversation_id::text = :cid
           and user_id::text = :me
         """
@@ -162,9 +162,9 @@ async def _get_both_feedback(conn, cid: str, conv) -> dict:
   rows = (
     await conn.execute(
       text(
-        f"""
+        """
         select user_id::text as uid, response
-        from {MATCH_FEEDBACK_TABLE}
+        from conversation_match_feedback
         where conversation_id::text = :cid
           and (user_id::text = :a or user_id::text = :b)
         """
@@ -677,13 +677,13 @@ async def submit_match_feedback(cid: str, body: MatchFeedbackIn, user_id: uuid.U
 
     await conn.execute(
       text(
-        f"""
-        insert into {MATCH_FEEDBACK_TABLE} (conversation_id, user_id, response, {MATCH_FEEDBACK_TS_COL})
+        """
+        insert into conversation_match_feedback (conversation_id, user_id, response, responded_at)
         values (:cid, :uid, :resp, now())
         on conflict (conversation_id, user_id)
         do update
           set response = excluded.response,
-              {MATCH_FEEDBACK_TS_COL} = now()
+              responded_at = now()
         """
       ),
       {"cid": cid_uuid, "uid": user_id, "resp": bool(body.response)},

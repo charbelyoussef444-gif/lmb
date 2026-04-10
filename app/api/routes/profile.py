@@ -1,9 +1,11 @@
 # app/api/routes/profile.py
 import uuid
 import logging
+import time
+from collections import defaultdict
 from typing import List, Optional
 
-from fastapi import APIRouter, Body, HTTPException, Depends, Query, Response
+from fastapi import APIRouter, Body, HTTPException, Depends, Query, Response, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -11,6 +13,20 @@ from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from app.db.engine import engine
 from app.deps.auth import get_current_user_id
 from app.services.supabase import sb
+
+# Simple in-memory rate limiter for unauthenticated endpoints
+_rate_limit_store: dict[str, list[float]] = defaultdict(list)
+_RATE_LIMIT_WINDOW = 60  # seconds
+_RATE_LIMIT_MAX = 5  # max requests per window per IP
+
+def _check_rate_limit(ip: str) -> None:
+    now = time.time()
+    hits = _rate_limit_store[ip]
+    # Prune old entries
+    _rate_limit_store[ip] = [t for t in hits if now - t < _RATE_LIMIT_WINDOW]
+    if len(_rate_limit_store[ip]) >= _RATE_LIMIT_MAX:
+        raise HTTPException(429, "Too many requests. Please try again later.")
+    _rate_limit_store[ip].append(now)
 
 # ✅ storage cleanup (best-effort)
 from app.services.storage import delete_prefix
@@ -137,7 +153,7 @@ select u.id::text,
        u.location_id,
        case
          when l.id is null then null
-         else concat_ws(', ', l.city, l.admin_name, l.country)
+         else concat_ws(', ', coalesce(l.city_ascii, l.city), l.admin_name, l.country)
        end as location_label,
        u.personality_weight,
        u.interests_weight,
@@ -205,10 +221,10 @@ async def list_cities(country: str = Query(..., min_length=1, max_length=128)):
             await conn.execute(
                 text(
                     """
-                    select id, city, admin_name
+                    select id, coalesce(city_ascii, city) as city, admin_name
                     from locations
                     where country = :c
-                    order by population desc nulls last, city asc
+                    order by coalesce(city_ascii, city) asc
                     """
                 )
             ,
@@ -580,7 +596,8 @@ async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
 
 
 @router.get("/auth/check-email")
-async def check_email(email: str):
+async def check_email(email: str, request: Request):
+    _check_rate_limit(request.client.host if request.client else "unknown")
     async with engine.begin() as conn:
         row = (await conn.execute(text("""
             SELECT id, raw_app_meta_data->>'provider' as provider
@@ -595,7 +612,8 @@ async def check_email(email: str):
 
 
 @router.post("/auth/send-confirmation")
-async def send_confirmation(email: str = Body(..., embed=True)):
+async def send_confirmation(request: Request, email: str = Body(..., embed=True)):
+    _check_rate_limit(request.client.host if request.client else "unknown")
     # Generate the confirmation link/OTP via Supabase admin
     res = sb.auth.admin.generate_link({
         "type": "signup", 
@@ -617,7 +635,8 @@ async def send_confirmation(email: str = Body(..., embed=True)):
 
 
 @router.post("/auth/send-reset")
-async def send_reset(email: str = Body(..., embed=True)):
+async def send_reset(request: Request, email: str = Body(..., embed=True)):
+    _check_rate_limit(request.client.host if request.client else "unknown")
     res = sb.auth.admin.generate_link({
         "type": "recovery",
         "email": email,
