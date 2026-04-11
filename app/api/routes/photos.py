@@ -33,6 +33,24 @@ async def upload_gallery_photo(
     if position not in (1, 2, 3):
         raise HTTPException(400, "position must be 1, 2, or 3")
 
+    # Gallery uploads are gated on KYC verification. Until the user is
+    # verified, they cannot submit photos for review.
+    async with engine.begin() as conn:
+        user_row = (
+            await conn.execute(
+                text("SELECT verified FROM users WHERE id = :uid"),
+                {"uid": str(user_id)},
+            )
+        ).first()
+
+    if not user_row:
+        raise HTTPException(404, "User not found")
+    if not bool(user_row[0]):
+        raise HTTPException(
+            403,
+            "You must complete identity verification before uploading gallery photos.",
+        )
+
     key = make_photo_key(str(user_id), "gallery", position)
     path = await upload_file(file, key)
 
