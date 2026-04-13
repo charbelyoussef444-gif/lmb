@@ -177,6 +177,51 @@ where u.id = :uid
 """
 
 
+# ---------- Permanent delete helper ----------
+
+async def _permanent_delete(uid: str) -> None:
+    """Permanently delete a user: storage, KYC, events, DB row, Supabase auth."""
+    # Storage cleanup
+    for prefix in (f"gallery/{uid}/", f"kyc/{uid}/"):
+        try:
+            delete_prefix(prefix)
+        except Exception:
+            logger.exception("Storage cleanup failed for prefix=%s", prefix)
+
+    # Delete KYC hash
+    try:
+        sb.postgrest.from_("kyc_id_hashes").delete().eq("user_id", uid).execute()
+    except Exception:
+        logger.exception("Failed to delete kyc_id_hashes for uid=%s", uid)
+
+    # Delete events referencing this user's messages
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("""
+                DELETE FROM events
+                WHERE message_id IN (
+                    SELECT m.id FROM messages m
+                    JOIN conversations c ON c.id = m.conversation_id
+                    WHERE c.user_a_id = :uid OR c.user_b_id = :uid
+                )
+            """),
+            {"uid": uid},
+        )
+
+    # Delete user row
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM public.users WHERE id = :uid"),
+            {"uid": uid},
+        )
+
+    # Delete Supabase Auth account
+    try:
+        sb.auth.admin.delete_user(uid, should_soft_delete=False)
+    except Exception:
+        logger.exception("Supabase auth delete failed uid=%s", uid)
+
+
 # ---------- Routes ----------
 
 @router.post("/ping")
@@ -243,8 +288,10 @@ async def list_cities(country: str = Query(..., min_length=1, max_length=128)):
 
 @router.get("", response_model=ProfileOut)
 async def get_me(user_id: uuid.UUID = Depends(get_current_user_id)):
+    uid = str(user_id)
+
     async with engine.begin() as conn:
-        row = (await conn.execute(text(_PROFILE_SELECT_SQL), {"uid": str(user_id)})).mappings().first()
+        row = (await conn.execute(text(_PROFILE_SELECT_SQL), {"uid": uid})).mappings().first()
 
         if not row:
             row = (
@@ -275,12 +322,27 @@ async def get_me(user_id: uuid.UUID = Depends(get_current_user_id)):
                                   preferred_max_age,
                                   gender_pref as preferred_gender,
                                   preferred_max_distance_km,
-                                  last_login_at
+                                  last_login_at,
+                                  null::timestamptz as deleted_at,
+                                  null::timestamptz as scheduled_purge_at
                         """
                     ),
-                    {"uid": str(user_id)},
+                    {"uid": uid},
                 )
             ).mappings().first()
+
+    # Auto-purge: if past the 7-day window, permanently delete on login
+    row_dict = dict(row)
+    if row_dict.get("deleted_at") and row_dict.get("scheduled_purge_at"):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        purge_at = row_dict["scheduled_purge_at"]
+        if hasattr(purge_at, 'tzinfo') and purge_at.tzinfo is None:
+            purge_at = purge_at.replace(tzinfo=timezone.utc)
+        if now >= purge_at:
+            logger.info("Auto-purge triggered for uid=%s", uid)
+            await _permanent_delete(uid)
+            raise HTTPException(410, "Account has been permanently deleted")
 
     return _row_to_profile_out(row)
 
@@ -628,43 +690,7 @@ async def purge_expired_accounts(user_id: uuid.UUID = Depends(get_current_user_i
     for row in expired:
         uid = row["id"]
         try:
-            # Storage cleanup
-            for prefix in (f"gallery/{uid}/", f"kyc/{uid}/"):
-                try:
-                    delete_prefix(prefix)
-                except Exception:
-                    logger.exception("Storage cleanup failed for prefix=%s", prefix)
-
-            # Delete KYC hash
-            try:
-                sb.postgrest.from_("kyc_id_hashes").delete().eq("user_id", uid).execute()
-            except Exception:
-                logger.exception("Failed to delete kyc_id_hashes for uid=%s", uid)
-
-            # Delete events referencing this user's messages
-            async with engine.begin() as conn:
-                await conn.execute(
-                    text("""
-                        DELETE FROM events
-                        WHERE message_id IN (
-                            SELECT m.id FROM messages m
-                            JOIN conversations c ON c.id = m.conversation_id
-                            WHERE c.user_a_id = :uid OR c.user_b_id = :uid
-                        )
-                    """),
-                    {"uid": uid},
-                )
-
-            # Delete user row
-            async with engine.begin() as conn:
-                await conn.execute(
-                    text("DELETE FROM public.users WHERE id = :uid"),
-                    {"uid": uid},
-                )
-
-            # Delete Supabase Auth account
-            sb.auth.admin.delete_user(uid, should_soft_delete=False)
-
+            await _permanent_delete(uid)
             purged_count += 1
         except Exception:
             logger.exception("Failed to purge uid=%s", uid)
