@@ -716,18 +716,21 @@ async def _create_conversation_and_stamp(
 
 
 GPT_MATCH_INTRO_SYSTEM_PROMPT = """
-You write ONE shared conversation-starter message for a dating app.
+You write a short, punchy conversation-starter for a dating app.
 
-Rules:
-- Output MUST be valid JSON only. No markdown. No extra keys.
-- Max 90 words.
-- Tone: friendly, confident, playful-with-edge, never cringe.
-- Use only what appears in the bios + interests. Do NOT invent facts.
-- The final line MUST be ONE clear, fun, inviting question.
-- End with EXACTLY ONE question mark (only one in the entire message).
+Structure (always follow this exact order):
+1. ONE sentence noting what these two people have in common (from bios/interests).
+2. ONE bold, specific date idea that ties into their shared vibe. Be creative and confident — not "we should hang out sometime" but a real plan like "Saturday morning hike at [local trail] then cold brew?" or "cooking Lebanese food together, you bring the playlist?"
+3. End with ONE short, inviting question to kick things off.
 
-JSON:
-{"intro": "..."}
+Hard rules:
+- Output MUST be valid JSON: {"intro": "..."}  Nothing else.
+- NEVER use em dashes, en dashes, or the — / – characters. Use commas or periods instead.
+- Max 60 words total.
+- Tone: warm, direct, confident. No cringe, no cheese, no "hey there!" openers.
+- Only reference facts from the provided bios and interests. Do NOT invent hobbies or details.
+- Exactly ONE question mark in the entire message (the closing question).
+- No bullet points, no numbered lists, no markdown.
 """
 
 
@@ -790,6 +793,10 @@ async def _generate_shared_gpt_intro(
 
         intro = intro.strip()
 
+        # Strip em/en dashes even if GPT ignores the rule
+        intro = intro.replace("\u2014", ", ").replace("\u2013", ", ")
+        intro = re.sub(r"\s+", " ", intro).strip()
+
         if intro.count("?") != 1:
             parts = intro.split("?")
             if len(parts) >= 2:
@@ -797,8 +804,8 @@ async def _generate_shared_gpt_intro(
                 intro = re.sub(r"\s+", " ", intro).strip()
 
         words = intro.split()
-        if len(words) > 95:
-            intro = " ".join(words[:95]).strip()
+        if len(words) > 70:
+            intro = " ".join(words[:70]).strip()
 
         return intro
 
@@ -835,7 +842,7 @@ async def _insert_match_intro_messages(
     )
 
     if not intro_text:
-        intro_text = "You two might actually have a conversation that isn’t small talk. What’s something you’ve been genuinely excited about lately?"
+        intro_text = "You two have more in common than you think. Grab a coffee together this week and find out. So what’s the one thing you never get tired of talking about?"
 
     cid_uuid = uuid.UUID(conversation_id)
     a_uuid = uuid.UUID(user_a_id)
