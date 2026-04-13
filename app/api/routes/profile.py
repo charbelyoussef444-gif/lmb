@@ -542,7 +542,21 @@ async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
         ).mappings().first()
 
     if not row:
-        raise HTTPException(404, "User not found or already scheduled for deletion")
+        # Check if user exists but is already soft-deleted
+        async with engine.begin() as conn:
+            existing = (
+                await conn.execute(
+                    text("SELECT deleted_at, scheduled_purge_at FROM public.users WHERE id = :uid"),
+                    {"uid": uid},
+                )
+            ).mappings().first()
+        if existing and existing["deleted_at"]:
+            return {
+                "message": "Account is already scheduled for deletion.",
+                "deleted_at": existing["deleted_at"].isoformat(),
+                "scheduled_purge_at": existing["scheduled_purge_at"].isoformat(),
+            }
+        raise HTTPException(404, "User not found")
 
     return {
         "message": "Account scheduled for deletion. You have 7 days to recover it.",
