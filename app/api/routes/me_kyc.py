@@ -1,7 +1,6 @@
 # app/api/routes/me_kyc.py
 import os
 import uuid
-import httpx
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy import text
 
@@ -13,32 +12,9 @@ from app.services.storage import (
     upload_file_to_key,
     delete_prefix,
 )
+from app.core.telegram import send_telegram as _send_telegram
 
 router = APIRouter(prefix="/me/kyc", tags=["me-kyc"])
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip()
-
-
-async def _send_telegram(text_msg: str) -> None:
-    """Best-effort Telegram notify (never breaks KYC flow)."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_ADMIN_CHAT_ID:
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_ADMIN_CHAT_ID,
-        "text": text_msg,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(url, json=payload)
-    except Exception:
-        # don't crash verification if telegram is down
-        return
 
 
 def _sanitize_files(files: list[UploadFile]) -> list[UploadFile]:

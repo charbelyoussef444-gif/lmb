@@ -9,6 +9,7 @@ from app.db.engine import engine
 from app.services.storage import upload_file, make_photo_key
 from app.services.supabase import sb
 from app.core.config import settings
+from app.core.telegram import send_telegram
 
 router = APIRouter(tags=["photos"])
 
@@ -82,6 +83,26 @@ async def upload_gallery_photo(
                 {"uid": str(user_id), "url": path, "pos": position},
             )
         ).mappings().first()
+
+    # Best-effort Telegram notification for admin review
+    try:
+        async with engine.begin() as conn:
+            name_row = (
+                await conn.execute(
+                    text("SELECT full_name FROM users WHERE id = :uid"),
+                    {"uid": str(user_id)},
+                )
+            ).first()
+        full_name = (name_row[0] if name_row else None) or "Unknown"
+        await send_telegram(
+            f"\U0001f5bc <b>Gallery photo pending</b>\n\n"
+            f"<b>Name:</b> {full_name}\n"
+            f"<b>User ID:</b> {user_id}\n"
+            f"<b>Position:</b> {position}\n\n"
+            f"New gallery photo uploaded. Review required."
+        )
+    except Exception:
+        pass
 
     return {"ok": True, "photo_id": row["id"], "path": path}
 
