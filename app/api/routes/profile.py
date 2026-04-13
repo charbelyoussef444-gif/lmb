@@ -65,6 +65,10 @@ class ProfileOut(BaseModel):
     # NEW: last login (used for last_active computation)
     last_login_at: Optional[str] = None
 
+    # Soft-delete fields
+    deleted_at: Optional[str] = None
+    scheduled_purge_at: Optional[str] = None
+
 
 class OnboardingIn(BaseModel):
     age: int = Field(..., ge=18, le=99)
@@ -140,8 +144,9 @@ def _validate_location_id(location_id: Optional[int]) -> None:
 
 def _row_to_profile_out(row) -> dict:
     out = dict(row)
-    if out.get("last_login_at") is not None:
-        out["last_login_at"] = out["last_login_at"].isoformat()
+    for ts_key in ("last_login_at", "deleted_at", "scheduled_purge_at"):
+        if out.get(ts_key) is not None:
+            out[ts_key] = out[ts_key].isoformat()
     return out
 
 
@@ -163,7 +168,9 @@ select u.id::text,
        u.preferred_max_age,
        u.gender_pref as preferred_gender,
        u.preferred_max_distance_km,
-       u.last_login_at
+       u.last_login_at,
+       u.deleted_at,
+       u.scheduled_purge_at
 from users u
 left join locations l on l.id = u.location_id
 where u.id = :uid
@@ -513,86 +520,147 @@ async def complete_onboarding(
     return _row_to_profile_out(row)
 
 
-# ✅ Delete my account
-@router.delete("", status_code=204)
+# ✅ Soft-delete my account (7-day recovery window)
+@router.delete("")
 async def delete_me(user_id: uuid.UUID = Depends(get_current_user_id)):
     uid = str(user_id)
-    logger.info("delete_me uid=%s", uid)
+    logger.info("delete_me (soft) uid=%s", uid)
 
-    # Best-effort storage cleanup first
-    for prefix in (f"gallery/{uid}/", f"kyc/{uid}/"):
-        try:
-            delete_prefix(prefix)
-        except Exception:
-            logger.exception("Storage cleanup failed for prefix=%s", prefix)
-
-    # Delete KYC hash so the user can re-register with the same ID
-    try:
-        sb.postgrest.from_("kyc_id_hashes").delete().eq("user_id", uid).execute()
-    except Exception:
-        logger.exception("Failed to delete kyc_id_hashes for uid=%s", uid)
-
-    # Delete events that reference messages in any of this user's conversations
-    # (events.message_id FK blocks cascade deletion of messages)
-    try:
-        async with engine.begin() as conn:
+    async with engine.begin() as conn:
+        row = (
             await conn.execute(
                 text("""
-                    DELETE FROM events
-                    WHERE message_id IN (
-                        SELECT m.id FROM messages m
-                        JOIN conversations c ON c.id = m.conversation_id
-                        WHERE c.user_a_id = :uid OR c.user_b_id = :uid
-                    )
+                    UPDATE public.users
+                    SET deleted_at        = now(),
+                        scheduled_purge_at = now() + interval '7 days',
+                        updated_at        = now()
+                    WHERE id = :uid AND deleted_at IS NULL
+                    RETURNING deleted_at, scheduled_purge_at
                 """),
                 {"uid": uid},
             )
-    except Exception:
-        logger.exception("Failed to delete events for uid=%s", uid)
+        ).mappings().first()
 
-    # Delete app/profile row
-    try:
-        async with engine.begin() as conn:
-            res = await conn.execute(
-                text("delete from public.users where id = :uid"),
+    if not row:
+        raise HTTPException(404, "User not found or already scheduled for deletion")
+
+    return {
+        "message": "Account scheduled for deletion. You have 7 days to recover it.",
+        "deleted_at": row["deleted_at"].isoformat(),
+        "scheduled_purge_at": row["scheduled_purge_at"].isoformat(),
+    }
+
+
+# ✅ Recover a soft-deleted account within the 7-day window
+@router.post("/recover")
+async def recover_account(user_id: uuid.UUID = Depends(get_current_user_id)):
+    uid = str(user_id)
+    logger.info("recover_account uid=%s", uid)
+
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text("""
+                    UPDATE public.users
+                    SET deleted_at        = NULL,
+                        scheduled_purge_at = NULL,
+                        updated_at        = now()
+                    WHERE id = :uid
+                      AND deleted_at IS NOT NULL
+                      AND scheduled_purge_at > now()
+                    RETURNING id
+                """),
                 {"uid": uid},
             )
+        ).mappings().first()
 
-            if res.rowcount == 0:
-                raise HTTPException(status_code=404, detail="User not found")
+    if not row:
+        raise HTTPException(400, "No recoverable account found (already purged or not deleted)")
 
-    except IntegrityError as e:
-        logger.exception("IntegrityError during delete user uid=%s", uid)
-        raise HTTPException(
-            status_code=409,
-            detail="Cannot delete user because related rows still reference this account",
-        ) from e
+    return {"message": "Account recovered successfully."}
 
-    except HTTPException:
-        raise
 
-    except SQLAlchemyError as e:
-        logger.exception("DB error during delete user uid=%s", uid)
-        raise HTTPException(
-            status_code=500,
-            detail="DB error while deleting account",
-        ) from e
+# ✅ Permanently purge accounts past the 7-day window (called by cron / admin)
+@router.delete("/purge-expired", status_code=200)
+async def purge_expired_accounts(user_id: uuid.UUID = Depends(get_current_user_id)):
+    """Permanently delete all accounts whose 7-day window has expired.
+    Requires admin. Designed to be called by a scheduled cron job."""
+    # Check admin
+    async with engine.begin() as conn:
+        admin_row = (
+            await conn.execute(
+                text("SELECT admin FROM public.users WHERE id = :uid"),
+                {"uid": str(user_id)},
+            )
+        ).mappings().first()
+    if not admin_row or not admin_row["admin"]:
+        raise HTTPException(403, "Admin access required")
 
-    # Delete Supabase Auth account
-    try:
-        # keep soft_delete=False for real permanent deletion
-        sb.auth.admin.delete_user(uid, should_soft_delete=False)
-    except Exception as e:
-        logger.exception("Supabase auth delete failed uid=%s", uid)
+    # Find all accounts due for purge
+    async with engine.begin() as conn:
+        expired = (
+            await conn.execute(
+                text("""
+                    SELECT id::text FROM public.users
+                    WHERE deleted_at IS NOT NULL
+                      AND scheduled_purge_at <= now()
+                """)
+            )
+        ).mappings().all()
 
-        # At this point public.users is already gone, but auth user still exists.
-        # Return 500 so the client knows the deletion was not fully completed.
-        raise HTTPException(
-            status_code=500,
-            detail="Profile row deleted, but failed to delete auth account",
-        ) from e
+    purged_count = 0
+    errors = []
 
-    return Response(status_code=204)
+    for row in expired:
+        uid = row["id"]
+        try:
+            # Storage cleanup
+            for prefix in (f"gallery/{uid}/", f"kyc/{uid}/"):
+                try:
+                    delete_prefix(prefix)
+                except Exception:
+                    logger.exception("Storage cleanup failed for prefix=%s", prefix)
+
+            # Delete KYC hash
+            try:
+                sb.postgrest.from_("kyc_id_hashes").delete().eq("user_id", uid).execute()
+            except Exception:
+                logger.exception("Failed to delete kyc_id_hashes for uid=%s", uid)
+
+            # Delete events referencing this user's messages
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text("""
+                        DELETE FROM events
+                        WHERE message_id IN (
+                            SELECT m.id FROM messages m
+                            JOIN conversations c ON c.id = m.conversation_id
+                            WHERE c.user_a_id = :uid OR c.user_b_id = :uid
+                        )
+                    """),
+                    {"uid": uid},
+                )
+
+            # Delete user row
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text("DELETE FROM public.users WHERE id = :uid"),
+                    {"uid": uid},
+                )
+
+            # Delete Supabase Auth account
+            sb.auth.admin.delete_user(uid, should_soft_delete=False)
+
+            purged_count += 1
+        except Exception:
+            logger.exception("Failed to purge uid=%s", uid)
+            errors.append(uid)
+
+    return {
+        "purged": purged_count,
+        "errors": len(errors),
+        "error_ids": errors,
+    }
 
 
 @router.get("/auth/check-email")

@@ -87,7 +87,7 @@ async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
         await conn.execute(
             text(
                 """
-                select id, verified, banned, last_match_date, age, gender
+                select id, verified, banned, deleted_at, last_match_date, age, gender
                 from users
                 where id = :uid
                 """
@@ -102,6 +102,7 @@ async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
             "verified": False,
             "assessment_completed": False,
             "not_banned": False,
+            "not_deleted": False,
             "has_interest": False,
             "has_photos": False,
             "has_age": False,
@@ -171,6 +172,7 @@ async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
     verified = bool(u.get("verified"))
     banned = bool(u.get("banned"))
     not_banned = not banned
+    not_deleted = u.get("deleted_at") is None
     last_match_date = u.get("last_match_date")
 
     age_val = u.get("age")
@@ -183,6 +185,7 @@ async def _get_checks(conn, user_id: uuid.UUID) -> Dict[str, Any]:
         "verified": verified,
         "assessment_completed": assessment_completed,
         "not_banned": not_banned,
+        "not_deleted": not_deleted,
         "has_interest": has_interest,
         "has_photos": has_photos,
         "has_age": has_age,
@@ -207,6 +210,8 @@ def _cooldown_next_eligible_iso(last_match_date) -> Optional[str]:
 
 def _build_missing_reasons(checks: Dict[str, Any]) -> Dict[str, Any]:
     missing = []
+    if not checks.get("not_deleted", True):
+        missing.append("Your account is scheduled for deletion.")
     if not checks.get("not_banned", False):
         missing.append("Your account is banned.")
     if checks.get("has_age") is False:
@@ -500,6 +505,7 @@ async def _is_user_eligible_new_checks(conn, user_id: uuid.UUID) -> Tuple[bool, 
         checks["verified"]
         and checks["assessment_completed"]
         and checks["not_banned"]
+        and checks.get("not_deleted", True)
         and checks["has_interest"]
         and checks["has_photos"]
         and checks.get("has_age", False)
@@ -587,6 +593,7 @@ async def _fetch_candidate_pool(conn, a_user_id: str, a_lat: float, a_lng: float
                       and tc.trait_count >= :trait_expected
                       and pc.pref_count  >= :pref_required
                       and (u.banned is null or u.banned = false)
+                      and u.deleted_at is null
                 )
                 select
                   id,
@@ -892,6 +899,7 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
                     "verified": False,
                     "assessment_completed": False,
                     "not_banned": False,
+                    "not_deleted": False,
                     "has_interest": False,
                     "has_photos": False,
                     "has_age": False,
@@ -908,6 +916,7 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
             checks["verified"]
             and checks["assessment_completed"]
             and checks["not_banned"]
+            and checks.get("not_deleted", True)
             and checks["has_interest"]
             and checks["has_photos"]
             and checks.get("has_age", False)
@@ -936,6 +945,7 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
                 "verified": checks["verified"],
                 "assessment_completed": checks["assessment_completed"],
                 "not_banned": checks["not_banned"],
+                "not_deleted": checks.get("not_deleted", True),
                 "has_interest": checks["has_interest"],
                 "has_photos": checks["has_photos"],
                 "has_age": checks.get("has_age", False),
