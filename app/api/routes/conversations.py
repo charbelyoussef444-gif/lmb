@@ -301,7 +301,10 @@ async def list_conversations(user_id: uuid.UUID = Depends(get_current_user_id)):
       mc.id::text as id,
       u.full_name as partner_name,
       u.age as partner_age,
-      u.location as partner_city,
+      -- City label comes from the locations table (users only stores the
+      -- location_id FK). Prefer the ASCII form for consistent rendering
+      -- and fall back to the native spelling when ASCII is null.
+      coalesce(l.city_ascii, l.city) as partner_city,
       lm.content_text as last_message,
       lm.created_at as last_at_ts,
       mc.match_score as compatibility,
@@ -325,6 +328,7 @@ async def list_conversations(user_id: uuid.UUID = Depends(get_current_user_id)):
 
     from my_convos mc
     join users u on u.id = mc.partner_id
+    left join locations l on l.id = u.location_id
     left join last_msg lm on lm.conversation_id = mc.id
     left join unread un on un.conversation_id = mc.id
     order by coalesce(lm.created_at, 'epoch') desc;
