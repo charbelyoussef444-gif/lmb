@@ -17,6 +17,7 @@ from openai import AsyncOpenAI
 from app.db.engine import engine
 from app.deps.auth import get_current_user_id
 from app.core.firebase import send_push
+from app.core.config import settings as _app_settings
 
 router = APIRouter(prefix="/matching", tags=["matching"])
 logger = logging.getLogger(__name__)
@@ -37,6 +38,41 @@ DEFAULT_MAX_DISTANCE_KM = 25
 EARTH_RADIUS_KM = 6371.0
 
 SYSTEM_BOT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+
+
+# ── Global pre-launch hold ─────────────────────────────────────────────
+# Matching is disabled for ALL users until settings.MATCHING_LAUNCH_AT.
+# This is a temporary launch gate (not a per-user cooldown) so the UX path
+# is intentionally separate: status responses carry `launch_pending: true`
+# so the client can render a dedicated launch banner instead of treating
+# it as a 24h cooldown timer.
+LAUNCH_REASON = "Matching opens June 1, 2026"
+
+
+def _launch_dt_utc() -> datetime:
+    """Parse MATCHING_LAUNCH_AT to a UTC-anchored datetime. Falls back to
+    June 1 2026 00:00 Asia/Beirut (= May 31 2026 21:00 UTC) if the env var
+    is malformed, so a config typo can't accidentally open matching early."""
+    try:
+        parsed = datetime.fromisoformat(_app_settings.MATCHING_LAUNCH_AT)
+        if parsed.tzinfo is None:
+            # Naive datetime — assume Asia/Beirut DST offset for safety.
+            parsed = parsed.replace(tzinfo=timezone(timedelta(hours=3)))
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return datetime(2026, 5, 31, 21, 0, 0, tzinfo=timezone.utc)
+
+
+def _is_pre_launch() -> Tuple[bool, str]:
+    """Returns (pre_launch_active, launch_ts_iso_utc).
+
+    Cheap pure-Python check; safe to call on every request. Re-reads the
+    setting each call so an env-var rollover doesn't require a restart."""
+    launch_utc = _launch_dt_utc()
+    now_utc = datetime.now(timezone.utc)
+    # Format like the rest of the API: trailing 'Z' instead of '+00:00'.
+    launch_iso = launch_utc.isoformat().replace("+00:00", "Z")
+    return (now_utc < launch_utc, launch_iso)
 
 
 class MatchResultIneligible(BaseModel):
@@ -498,6 +534,14 @@ async def _is_user_eligible_new_checks(conn, user_id: uuid.UUID) -> Tuple[bool, 
     """
     checks = await _get_checks(conn, user_id)
 
+    # Global pre-launch hold — short-circuits before the per-user checks so
+    # the response carries the launch reason rather than a stale completion
+    # message (e.g., "Personality incomplete"). Mirror of the same check in
+    # get_matching_status() below; both endpoints must agree.
+    pre_launch, _launch_iso = _is_pre_launch()
+    if pre_launch:
+        return False, LAUNCH_REASON, checks
+
     if not checks.get("exists"):
         return False, "User not found.", checks
 
@@ -890,11 +934,18 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
     async with engine.begin() as conn:
         checks = await _get_checks(conn, user_id)
 
+        # Compute global pre-launch hold up front; both the user-not-found
+        # and the user-exists branches need it. next_eligible_ts_utc is set
+        # to the launch instant so existing countdown UI continues to work
+        # (the client uses launch_pending to switch copy/imagery).
+        pre_launch, launch_iso = _is_pre_launch()
+
         if not checks.get("exists"):
             return {
                 "eligible": False,
-                "reason": "User not found.",
-                "missing": ["User not found."],
+                "reason": LAUNCH_REASON if pre_launch else "User not found.",
+                "launch_pending": pre_launch,
+                "missing": [LAUNCH_REASON] if pre_launch else ["User not found."],
                 "checks": {
                     "verified": False,
                     "assessment_completed": False,
@@ -907,7 +958,32 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
                     "photos_count": 0,
                     "interests_count": 0,
                 },
-                "next_eligible_ts_utc": None,
+                "next_eligible_ts_utc": launch_iso if pre_launch else None,
+            }
+
+        if pre_launch:
+            # User exists but matching hasn't opened yet. We still surface
+            # their completion checks so the profile-build flow remains
+            # actionable — they can finish KYC / photos / assessment before
+            # June 1 and be ready to match the moment it unlocks.
+            return {
+                "eligible": False,
+                "reason": LAUNCH_REASON,
+                "launch_pending": True,
+                "missing": [LAUNCH_REASON],
+                "checks": {
+                    "verified": checks["verified"],
+                    "assessment_completed": checks["assessment_completed"],
+                    "not_banned": checks["not_banned"],
+                    "not_deleted": checks.get("not_deleted", True),
+                    "has_interest": checks["has_interest"],
+                    "has_photos": checks["has_photos"],
+                    "has_age": checks.get("has_age", False),
+                    "has_gender": checks.get("has_gender", False),
+                    "photos_count": checks["photos_count"],
+                    "interests_count": checks["interests_count"],
+                },
+                "next_eligible_ts_utc": launch_iso,
             }
 
         next_iso = _cooldown_next_eligible_iso(checks.get("last_match_date"))
@@ -940,6 +1016,7 @@ async def get_matching_status(user_id: uuid.UUID = Depends(get_current_user_id))
         return {
             "eligible": eligible_now,
             "reason": reason,
+            "launch_pending": False,
             "missing": built["missing"] if not req_ok else ([] if eligible_now else ["Please wait before requesting another match."]),
             "checks": {
                 "verified": checks["verified"],

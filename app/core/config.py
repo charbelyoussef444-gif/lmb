@@ -20,4 +20,11 @@ class Settings:
     # Local dev helper: allow skipping SSL
     LM_INSECURE_SSL = os.getenv("LM_INSECURE_SSL", "0") == "1"
 
+    # Global matching launch gate. Until this instant, /matching/generate
+    # returns ineligible and /matching/status returns launch_pending=true.
+    # Users can still build profiles; only matching is held. ISO-8601 with
+    # timezone offset. Asia/Beirut DST is +03:00 in June. Override via env
+    # to roll launch forward/back without redeploying code.
+    MATCHING_LAUNCH_AT = os.getenv("MATCHING_LAUNCH_AT", "2026-06-01T00:00:00+03:00")
+
 settings = Settings()
